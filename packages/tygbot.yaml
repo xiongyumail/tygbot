@@ -1,0 +1,145 @@
+substitutions:
+  device_name: tygbot
+  device_friendly_name: TYGBot
+  repository_ref: v1.0.0
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_friendly_name}
+  project:
+    name: xiongyu.tygbot
+    version: "1.0.0"
+  compile_process_limit: 2
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+debug:
+  update_interval: 10s
+
+# Credential-free: builds the public firmware. Private configs add the API key,
+# OTA password and AP password on top of this package.
+api:
+  encryption: {}
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+safe_mode:
+
+wifi:
+  # Omit STA credentials to retain Wi-Fi provisioned into flash.
+  reboot_timeout: 0s
+  ap:
+    ssid: ${device_name}-setup
+  # Bluetooth scanning shares the radio; keep it off while the hotspot may be in use.
+  on_connect:
+    - esp32_ble_tracker.start_scan:
+        continuous: true
+  on_disconnect:
+    - esp32_ble_tracker.stop_scan:
+
+captive_portal:
+
+improv_serial:
+  next_url: http://{{ip_address}}/
+
+esp32_improv:
+  authorizer: none
+  next_url: http://{{ip_address}}/
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+    continuous: false
+
+bluetooth_proxy:
+  active: true
+
+mdns:
+
+dashboard_import:
+  package_import_url: github://xiongyumail/tygbot/packages/tygbot.yaml@${repository_ref}
+
+time:
+  - platform: sntp
+    id: tygbot_time
+    timezone: Asia/Shanghai
+    servers:
+      - ntp.aliyun.com
+      - pool.ntp.org
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/xiongyumail/tygbot
+      ref: ${repository_ref}
+    components: [tygbot]
+    refresh: never
+
+tygbot:
+  id: tygbot_core
+  require_auth: false
+  host: ${device_name}.local
+
+button:
+  - platform: template
+    name: Open Door 开门
+    icon: mdi:door-open
+    on_press:
+      - lambda: id(tygbot_core).open(false);
+  - platform: template
+    name: Door Check 门禁只读检查
+    icon: mdi:connection
+    entity_category: diagnostic
+    on_press:
+      - lambda: id(tygbot_core).open(true);
+  - platform: safe_mode
+    name: Safe Mode 安全模式重启
+    entity_category: diagnostic
+    # Recovery control is disabled by default.
+    disabled_by_default: true
+
+binary_sensor:
+  - platform: template
+    name: Service Ready 服务就绪
+    lambda: return id(tygbot_core).ready();
+  - platform: template
+    name: Logged In 桃园谷已登录
+    lambda: return id(tygbot_core).logged_in();
+  - platform: template
+    name: Door Busy 开门请求处理中
+    lambda: return id(tygbot_core).busy();
+
+text_sensor:
+  - platform: template
+    name: Status 状态
+    lambda: return id(tygbot_core).status();
+    update_interval: 2s
+  - platform: template
+    name: Last Door 最近开门结果
+    lambda: return id(tygbot_core).last_result();
+    update_interval: 2s
+
+sensor:
+  - platform: debug
+    free:
+      name: Free Heap 可用内存
+    block:
+      name: Largest Heap 最大连续内存
+    min_free:
+      name: Minimum Heap 最低可用内存
+  - platform: uptime
+    name: Uptime 运行时间
+    entity_category: diagnostic
+  - platform: wifi_signal
+    name: Wi-Fi 信号
+    entity_category: diagnostic

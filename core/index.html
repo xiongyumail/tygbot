@@ -1,0 +1,373 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="开门">
+<meta name="theme-color" content="#f5f5f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<title>开单元门</title>
+<style>
+  :root {
+    --fg: #1f1f1f; --muted: #7a7a7a; --bg: #f5f5f4; --card: #fff; --line: #e6e6e3;
+    --accent: #f08a3c; --accent-soft: #fdeee2; --ok: #2f8f5b; --ok-soft: #e3f3ea; --bad: #c4423a; --bad-soft: #fbe7e5;
+    --idle: #c9c9c6; --shadow: 0 6px 18px rgba(240, 138, 60, .28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #ececec; --muted: #9a9a9a; --bg: #151515; --card: #1f1f1f; --line: #2e2e2e;
+      --accent-soft: #3a2a1d; --ok: #5cc28a; --ok-soft: #1c3226; --bad: #e8786f; --bad-soft: #3a2220;
+      --idle: #4a4a4a; --shadow: 0 6px 18px rgba(0, 0, 0, .4);
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; padding: calc(12px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
+         background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 380px; margin: 0 auto; }
+
+  header { display: flex; align-items: center; justify-content: space-between; height: 40px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; background: var(--card); border: 1px solid var(--line); color: var(--muted); }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+  .badge.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+
+  .door { display: flex; flex-direction: column; align-items: center; padding: 9vh 0 4vh; }
+  #open { position: relative; width: 148px; height: 148px; border-radius: 50%; border: none; cursor: pointer;
+          background: var(--accent); color: #fff; box-shadow: var(--shadow); touch-action: manipulation;
+          display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+          font: 500 18px/1 inherit; transition: background .25s, transform .1s, box-shadow .25s; }
+  #open:active:not(:disabled) { transform: scale(.97); }
+  #open svg { width: 34px; height: 34px; }
+  #open.off { background: var(--idle); box-shadow: none; }
+  #open.done { background: var(--ok); }
+  #open.busy::after { content: ""; position: absolute; inset: -7px; border-radius: 50%;
+                      border: 3px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #msg { margin-top: 18px; min-height: 22px; font-size: 15px; text-align: center; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 12px; }
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; }
+  .item + .item { border-top: 1px solid var(--line); }
+  .item .k { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .item .v { text-align: right; font-size: 14px; }
+  .item .v.act { display: flex; align-items: center; gap: 10px; }
+  .ghost { padding: 5px 12px; font-size: 13px; border-radius: 999px; border: 1px solid var(--line);
+           background: transparent; color: var(--fg); cursor: pointer; }
+
+  #login { padding: 12px 14px 14px; }
+  .head { display: flex; justify-content: space-between; align-items: center; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .steps { display: flex; gap: 6px; margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
+  .steps span { flex: 1; text-align: center; padding: 4px 0; border-radius: 6px; background: var(--bg); }
+  .steps span.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .steps span.past { color: var(--ok); }
+  .notice { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px; background: var(--accent-soft); color: var(--fg); }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+  .row { display: flex; gap: 8px; }
+  input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 16px; border: 1px solid var(--line);
+          border-radius: 8px; background: var(--bg); color: var(--fg); }
+  input:focus { outline: none; border-color: var(--accent); background: var(--card); }
+  .row button { min-width: 100px; height: 40px; padding: 0 14px; font-size: 14px; border: none; border-radius: 8px;
+                background: var(--accent); color: #fff; white-space: nowrap; cursor: pointer; }
+  .row button:disabled { opacity: .45; cursor: default; }
+  .captcha { display: flex; align-items: center; gap: 10px; }
+  #captchaImg { height: 40px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
+  .hint { font-size: 12px; color: var(--muted); }
+  #loginMsg { margin-top: 12px; min-height: 20px; font-size: 13px; }
+  details { padding: 10px 0; font-size: 13px; color: var(--muted); }
+  summary { cursor: pointer; }
+  details input[type=file] { display: block; width: 100%; height: auto; padding: 8px 0; border: 0; background: none; font-size: 13px; }
+  footer { margin-top: 18px; text-align: center; font-size: 12px; color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>单元门</h1>
+    <span class="badge" id="badge">连接中</span>
+  </header>
+
+  <section class="door">
+    <button id="open" type="button" aria-label="开门">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path id="icon" d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21M4 21h16M14.5 12.5v.01"/>
+      </svg>
+      <span id="label">开门</span>
+    </button>
+    <div id="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <div class="item"><span class="k">上次开门</span><span class="v" id="last">—</span></div>
+    <div class="item"><span class="k">桃园谷登录</span>
+      <span class="v act"><span id="loginState">—</span> <button class="ghost" id="relogin" type="button">重新登录</button></span></div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>固件升级<span id="ver"></span></summary>
+      <input id="file" type="file" accept=".bin">
+      <button class="ghost" id="upload" type="button">上传</button>
+      <div id="upMsg" role="status" aria-live="polite"></div>
+    </details>
+  </section>
+
+  <section class="card" id="login" hidden>
+    <div class="head">
+      <h2>桃园谷登录</h2>
+      <button class="ghost" id="closeLogin" type="button">收起</button>
+    </div>
+    <div class="steps"><span data-s="1">手机号</span><span data-s="2">图形验证码</span><span data-s="3">短信验证码</span></div>
+    <div class="notice" id="reloginHint" hidden>当前已登录。重新登录可能使其他设备的同一账号掉线；验证码只用于本次登录。</div>
+    <div>
+      <label for="phone">手机号</label>
+      <div class="row">
+        <input id="phone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="11" placeholder="11 位手机号">
+        <button id="send" type="button">发送验证码</button>
+      </div>
+    </div>
+    <div id="s2" hidden>
+      <label for="captcha">图形验证码</label>
+      <div class="captcha">
+        <img id="captchaImg" alt="图形验证码，点击更换">
+        <span class="hint">点击图片可更换<br>输入 4 位后自动提交</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="captcha" autocomplete="off" autocapitalize="off" maxlength="8">
+        <button id="captchaOk" type="button">确定</button>
+      </div>
+    </div>
+    <div id="s3" hidden>
+      <label for="sms">短信验证码</label>
+      <div class="row">
+        <input id="sms" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
+        <button id="loginBtn" type="button">登录</button>
+      </div>
+    </div>
+    <div id="loginMsg" role="status" aria-live="polite"></div>
+  </section>
+  <footer>仅供授权测试使用，非官方项目。</footer>
+</main>
+<script src="/events.js"></script>
+<script>
+// 登录过期或密码已修改时，任何请求返回 401 都转到登录页
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const response = await nativeFetch(...args);
+  if (response.status === 401) location.replace('/auth?next=' + encodeURIComponent(location.pathname + location.search));
+  return response;
+};
+const $ = id => document.getElementById(id);
+const btn = $('open'), msg = $('msg'), lm = $('loginMsg');
+let loggedOut = false, busy = false, resendUntil = 0, doneTimer = 0;
+
+function say(el, text, cls) { el.className = cls || ''; el.textContent = text; }
+
+// 只简化网页显示，接口和记录中的原始耗时保持不变。
+function formatSeconds(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value.toFixed(2) : '—';
+}
+
+// 请求在跑时显示已等了几秒。
+function ticking(el, text) {
+  const t0 = Date.now();
+  say(el, text + '…');
+  const id = setInterval(() => say(el, text + '… ' + Math.floor((Date.now() - t0) / 1000) + ' 秒'), 1000);
+  return () => clearInterval(id);
+}
+
+function setBadge(text, cls) { const b = $('badge'); b.textContent = text; b.className = 'badge ' + (cls || ''); }
+
+function setDoor(state) {      // idle / off / busy / done
+  btn.className = state === 'idle' ? '' : state;
+  $('label').textContent = { idle: '开门', off: '未登录', busy: '开门中', done: '已开门' }[state];
+  btn.disabled = state === 'busy';
+}
+
+// 状态靠 /events 推送：连上先收 snapshot，之后 door_start / door / login 增量更新
+const S = { login: null, last_door: null, version: null };
+let mine = false;   // 本页发起的开门：按钮和提示由点击流程管
+
+function render() {
+  loggedOut = !!(S.login && !S.login.ok);
+  if (!btn.classList.contains('busy') && !btn.classList.contains('done')) setDoor(loggedOut ? 'off' : 'idle');
+  if (loggedOut) setBadge('未登录', 'bad');
+  else setBadge(S.login ? '已登录' : '在线', 'ok');
+  const d = S.last_door, last = $('last');
+  if (d) {
+    const result = document.createElement('span');
+    say(result, d.ok ? '已开门' : '失败', d.ok ? 'ok' : 'bad');
+    last.replaceChildren(String(d.at || '').slice(5, 16) + ' · ', result,
+      (d.ok ? ' · ' + formatSeconds(d.seconds) + ' 秒' : '') + (d.source ? ' · ' + d.source : ''));
+  } else last.textContent = '—';
+  say($('loginState'), loggedOut ? '未登录' : S.login ? '已登录' : '—', loggedOut ? 'bad' : '');
+  $('relogin').hidden = loggedOut || !$('login').hidden;
+  $('ver').textContent = S.version ? ' · v' + S.version : '';
+  if (loggedOut) showLogin(false);
+}
+
+const stream = new TYGBotStream({
+  onSnapshot: s => {
+    Object.assign(S, s);
+    if (s.busy && !mine) setDoor('busy');
+    else if (!s.busy && !mine && btn.classList.contains('busy')) setDoor('idle');
+    render();
+  },
+  onDisconnected: () => setBadge('连接恢复中', 'bad'),
+  events: {
+    login: l => { S.login = l; render(); },
+    door_start: () => { if (!mine) { clearTimeout(doneTimer); setDoor('busy'); } render(); },
+    door: d => {
+      S.last_door = d;
+      if (!mine) {
+        say(msg, d.ok ? '已开门 · ' + formatSeconds(d.seconds) + ' 秒 · ' + d.source : '开门失败：' + d.detail, d.ok ? 'ok' : 'bad');
+        setDoor(d.ok ? 'done' : 'idle');
+        if (d.ok) doneTimer = setTimeout(() => { setDoor('idle'); render(); }, 3000);
+      }
+      render();
+    }
+  }
+});
+
+function showLogin(relogin) {
+  $('login').hidden = false;
+  $('relogin').hidden = true;
+  $('reloginHint').hidden = !relogin;
+  $('closeLogin').hidden = loggedOut;
+  if (!$('s2').hidden || !$('s3').hidden) return;
+  markStep(1);
+}
+
+function markStep(n) {
+  document.querySelectorAll('.steps span').forEach(s => {
+    const i = +s.dataset.s;
+    s.className = i === n ? 'on' : i < n ? 'past' : '';
+  });
+}
+
+btn.onclick = async () => {
+  if (loggedOut) { showLogin(false); $('phone').focus(); return; }
+  clearTimeout(doneTimer);
+  setDoor('busy');
+  mine = true;
+  const stop = ticking(msg, '开门中');
+  try {
+    const r = await fetch('/door?from=web', { method: 'POST' });
+    const j = await r.json();
+    stop();
+    if (j.ok) {
+      say(msg, '已开门 · ' + formatSeconds(j.seconds) + ' 秒', 'ok');
+      setDoor('done');
+      doneTimer = setTimeout(() => { setDoor('idle'); render(); }, 3000);
+    } else {
+      say(msg, '开门失败：' + (j.detail || r.status), 'bad');
+      setDoor('idle');
+    }
+  } catch (e) {
+    stop(); say(msg, '服务未连接', 'bad'); setDoor('idle');
+  }
+  mine = false;
+  render();
+};
+
+function step(name) {
+  $('s2').hidden = name !== 'captcha';
+  $('s3').hidden = name !== 'sms';
+  markStep({ captcha: 2, sms: 3 }[name] || 1);
+  if (name === 'captcha') { $('captcha').value = ''; $('captcha').focus(); }
+  if (name === 'sms') { $('sms').value = ''; $('sms').focus(); }
+}
+
+function refreshSend() {
+  const left = Math.ceil((resendUntil - Date.now()) / 1000);
+  $('send').disabled = busy || left > 0;
+  $('send').textContent = left > 0 ? left + ' 秒后重发' : '发送验证码';
+}
+setInterval(refreshSend, 1000);
+
+const NOTE = { send: '正在发送', captcha: '正在验证', sms: '正在登录' };
+
+async function call(name, body) {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('.row button').forEach(b => b.disabled = true);
+  const stop = ticking(lm, NOTE[name]);
+  try {
+    const r = await fetch('/login/' + name, { method: 'POST', body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' } });
+    const j = await r.json();
+    stop();
+    say(lm, j.detail || '', j.ok ? '' : 'bad');
+    if (j.captcha) $('captchaImg').src = j.captcha;
+    if (j.next === 'sms') resendUntil = Date.now() + 60000;
+    if (j.next === 'done') {
+      step(null);
+      $('login').hidden = true;
+      $('relogin').hidden = false;
+      say(msg, j.detail || '登录成功', j.detail && j.detail !== '登录成功' ? 'bad' : 'ok');
+      resendUntil = 0;
+    } else if (j.next) step(j.next);
+  } catch (e) {
+    stop(); say(lm, '服务未连接', 'bad');
+  }
+  busy = false;
+  document.querySelectorAll('.row button').forEach(b => b.disabled = false);
+  refreshSend();
+}
+
+$('send').onclick = () => {
+  const phone = $('phone').value.trim();
+  if (!/^1\d{10}$/.test(phone)) { say(lm, '请输入 11 位手机号', 'bad'); $('phone').focus(); return; }
+  call('send', { phone });
+};
+$('captchaOk').onclick = () => { const c = $('captcha').value.trim(); if (c) call('captcha', { code: c }); };
+$('captchaImg').onclick = () => call('captcha', { code: '' });
+$('captcha').oninput = e => { if (e.target.value.trim().length === 4) $('captchaOk').click(); };
+$('loginBtn').onclick = () => { const c = $('sms').value.trim(); if (c) call('sms', { code: c }); };
+$('phone').onkeydown = e => { if (e.key === 'Enter') $('send').click(); };
+$('captcha').onkeydown = e => { if (e.key === 'Enter') $('captchaOk').click(); };
+$('sms').onkeydown = e => { if (e.key === 'Enter') $('loginBtn').click(); };
+$('relogin').onclick = () => showLogin(!loggedOut);
+
+// 与热点配网页相同。只接受 ota.bin：应用镜像在 0x20 处是描述符魔数，factory.bin 开头是引导程序。
+$('upload').onclick = async () => {
+  const f = $('file').files[0];
+  const head = f && new DataView(await f.slice(0, 0x24).arrayBuffer());
+  if (!head || head.byteLength < 0x24 || head.getUint8(0) !== 0xe9 || head.getUint32(0x20, true) !== 0xabcd5432) {
+    say($('upMsg'), '请选择 .ota.bin 固件', 'bad'); return;
+  }
+  const body = new FormData(); body.append('update', f);
+  $('upload').disabled = true; say($('upMsg'), '正在上传…');
+  try {
+    const r = await fetch('/update', { method: 'POST', body });
+    const ok = r.ok && (await r.text()).includes('Successful');
+    say($('upMsg'), ok ? '升级完成，设备正在重启' : '升级失败' + (r.ok ? '' : '（' + r.status + '）'), ok ? 'ok' : 'bad');
+  } catch (_) {
+    say($('upMsg'), '上传中断，设备可能正在重启', 'bad');
+  }
+  $('upload').disabled = false;
+};
+$('closeLogin').onclick = () => { $('login').hidden = true; $('relogin').hidden = loggedOut; };
+
+if (!document.hidden) stream.resume();
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stream.pause(); else stream.resume();
+});
+window.addEventListener('offline', () => stream.pause());
+window.addEventListener('online', () => { if (!document.hidden) stream.resume(); });
+window.addEventListener('pagehide', () => stream.pause());
+window.addEventListener('pageshow', () => { if (!document.hidden) stream.resume(); });
+</script>
+</body>
+</html>

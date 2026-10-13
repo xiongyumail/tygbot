@@ -1,0 +1,19 @@
+# Copy to tygbot.yaml. Store credentials only in secrets.yaml.
+substitutions:
+  device_name: tygbot
+  device_friendly_name: TYGBot
+
+packages:
+  tygbot: github://xiongyumail/tygbot/packages/tygbot.yaml@v1.0.0
+
+api:
+  encryption:
+    key: !secret tygbot_api_key
+
+ota:
+  - platform: esphome
+    password: !secret tygbot_ota_password
+
+wifi:
+  ap:
+    password: !secret tygbot_fallback_password

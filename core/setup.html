@@ -1,0 +1,190 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Wi-Fi 配网</title>
+<style>
+  :root {
+    --fg: #1f1f1f; --muted: #7a7a7a; --bg: #f5f5f4; --card: #fff; --line: #e6e6e3;
+    --accent: #f08a3c; --accent-soft: #fdeee2; --ok: #2f8f5b; --ok-soft: #e3f3ea; --bad: #c4423a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #ececec; --muted: #9a9a9a; --bg: #151515; --card: #1f1f1f; --line: #2e2e2e;
+      --accent-soft: #3a2a1d; --ok: #5cc28a; --ok-soft: #1c3226; --bad: #e8786f;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; padding: calc(12px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
+         background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 380px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; height: 40px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  .badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--card);
+           border: 1px solid var(--line); color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 12px; }
+  .head { display: flex; justify-content: space-between; align-items: center; padding: 8px 0 4px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0; }
+  .ghost { padding: 5px 12px; font-size: 13px; border-radius: 999px; border: 1px solid var(--line);
+           background: transparent; color: var(--fg); cursor: pointer; }
+  .net { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 0; border: 0; background: none;
+         color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+  .net + .net { border-top: 1px solid var(--line); }
+  .net .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .net.on .name { color: var(--accent); font-weight: 600; }
+  .net svg { flex: none; width: 18px; height: 18px; color: var(--muted); }
+  .empty { padding: 10px 0; color: var(--muted); font-size: 13px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+  input { width: 100%; height: 40px; padding: 0 12px; font-size: 16px; border: 1px solid var(--line);
+          border-radius: 8px; background: var(--bg); color: var(--fg); }
+  input:focus { outline: none; border-color: var(--accent); background: var(--card); }
+  .primary { width: 100%; height: 42px; margin: 14px 0 10px; border: 0; border-radius: 8px; font-size: 15px;
+             background: var(--accent); color: #fff; cursor: pointer; }
+  .primary:disabled { opacity: .45; cursor: default; }
+  #msg { min-height: 20px; margin-bottom: 10px; font-size: 13px; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+  details { padding: 10px 0; font-size: 13px; color: var(--muted); }
+  summary { cursor: pointer; }
+  details input[type=file] { height: auto; padding: 8px 0; border: 0; background: none; font-size: 13px; }
+  footer { margin-top: 18px; text-align: center; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Wi-Fi 配网</h1>
+    <span class="badge" id="device">—</span>
+  </header>
+
+  <section class="card">
+    <div class="head"><h2>附近的网络</h2><button class="ghost" id="rescan" type="button">刷新</button></div>
+    <div id="nets"><div class="empty">正在扫描…</div></div>
+  </section>
+
+  <section class="card">
+    <label for="ssid">网络名称</label>
+    <input id="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <label for="psk">密码</label>
+    <input id="psk" type="password" maxlength="64" autocomplete="off">
+    <button class="primary" id="save" type="button">连接</button>
+    <div id="msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>固件升级 · v__TG_VERSION__</summary>
+      <input id="file" type="file" accept=".bin">
+      <button class="ghost" id="upload" type="button">上传</button>
+      <div id="upMsg" role="status" aria-live="polite"></div>
+    </details>
+  </section>
+
+  <footer><span id="mac"></span><br>仅供授权测试使用，非官方项目。</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const SVG = 'http://www.w3.org/2000/svg';
+let name = '';
+
+function say(el, text, cls) { el.className = cls || ''; el.textContent = text; }
+
+// Signal strength as 1–3 bars.
+function bars(rssi) {
+  const level = rssi > -60 ? 3 : rssi > -75 ? 2 : 1;
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', '0 0 18 18');
+  [[2, 12, 4], [7, 8, 8], [12, 4, 12]].forEach(([x, y, h], i) => {
+    const r = document.createElementNS(SVG, 'rect');
+    r.setAttribute('x', x); r.setAttribute('y', y); r.setAttribute('width', 4); r.setAttribute('height', h);
+    r.setAttribute('rx', 1); r.setAttribute('fill', 'currentColor'); r.setAttribute('opacity', i < level ? 1 : .25);
+    svg.appendChild(r);
+  });
+  return svg;
+}
+
+function lock() {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  const p = document.createElementNS(SVG, 'path');
+  p.setAttribute('fill', 'currentColor');
+  p.setAttribute('d', 'M12 17a2 2 0 1 0 0-4 2 2 0 0 0 0 4m6-9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h1V6a5 5 0 0 1 10 0v2h1m-6-5a3 3 0 0 0-3 3v2h6V6a3 3 0 0 0-3-3');
+  svg.appendChild(p);
+  return svg;
+}
+
+function pick(ssid) {
+  $('ssid').value = ssid;
+  document.querySelectorAll('.net').forEach(n => n.classList.toggle('on', n.dataset.ssid === ssid));
+  $('psk').focus();
+}
+
+async function scan() {
+  try {
+    const r = await fetch('/config.json', { cache: 'no-store' });
+    const c = await r.json();
+    name = c.name || '';
+    $('device').textContent = name || '—';
+    $('mac').textContent = c.mac ? 'MAC ' + c.mac : '';
+    const list = $('nets'); list.textContent = '';
+    const seen = new Set();
+    (c.aps || []).filter(a => a && a.ssid && !seen.has(a.ssid) && seen.add(a.ssid))
+      .sort((a, b) => b.rssi - a.rssi)
+      .forEach(a => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'net'; b.dataset.ssid = a.ssid;
+        const n = document.createElement('span'); n.className = 'name'; n.textContent = a.ssid;
+        b.append(bars(a.rssi), n);
+        if (a.lock) b.append(lock());
+        b.onclick = () => pick(a.ssid);
+        list.appendChild(b);
+      });
+    if (!list.children.length) list.innerHTML = '<div class="empty">未发现网络，请稍后刷新</div>';
+  } catch (_) {
+    $('nets').innerHTML = '<div class="empty">读取失败，请刷新</div>';
+  }
+}
+
+$('save').onclick = async () => {
+  const ssid = $('ssid').value.trim(), psk = $('psk').value;
+  if (!ssid) { say($('msg'), '请选择或输入网络名称', 'bad'); return; }
+  $('save').disabled = true;
+  try {
+    const r = await fetch('/wifisave?ssid=' + encodeURIComponent(ssid) + '&psk=' + encodeURIComponent(psk), { cache: 'no-store' });
+    if (!r.ok) throw new Error();
+    const host = name ? 'http://' + name + '.local/' : '设备地址';
+    say($('msg'), '已保存，正在连接 ' + ssid + '。连接成功后热点会关闭，请回到该 Wi-Fi 访问 ' + host + '。', 'ok');
+  } catch (_) {
+    say($('msg'), '保存失败，请重试', 'bad');
+    $('save').disabled = false;
+  }
+};
+
+$('upload').onclick = async () => {
+  const f = $('file').files[0];
+  const head = f && new DataView(await f.slice(0, 0x24).arrayBuffer());
+  // ota.bin only: an app image carries its descriptor magic at 0x20; factory.bin starts with the bootloader.
+  if (!head || head.byteLength < 0x24 || head.getUint8(0) !== 0xe9 || head.getUint32(0x20, true) !== 0xabcd5432) {
+    say($('upMsg'), '请选择 .ota.bin 固件', 'bad'); return;
+  }
+  const body = new FormData(); body.append('update', f);
+  $('upload').disabled = true; say($('upMsg'), '正在上传…');
+  try {
+    const r = await fetch('/update', { method: 'POST', body });
+    const ok = r.ok && (await r.text()).includes('Successful');
+    say($('upMsg'), ok ? '升级完成，设备正在重启' : '升级失败' + (r.ok ? '' : '（' + r.status + '）'), ok ? 'ok' : 'bad');
+  } catch (_) {
+    say($('upMsg'), '上传中断，设备可能正在重启', 'bad');
+  }
+  $('upload').disabled = false;
+};
+
+$('rescan').onclick = scan;
+$('psk').onkeydown = e => { if (e.key === 'Enter') $('save').click(); };
+scan();
+</script>
+</body>
+</html>

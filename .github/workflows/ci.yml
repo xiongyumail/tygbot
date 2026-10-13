@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcjson-dev libmbedtls-dev
+      - name: Generated component is in sync
+        run: python3 sync_core.py && git diff --exit-code
+      - name: C tests
+        run: bash test.sh
+      - name: Node tests
+        run: node --test tests/test_*.js
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -v
+
+  firmware:
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/esphome
+            ~/.platformio
+          key: esphome-2026.9.1-${{ hashFiles('components/tygbot/__init__.py') }}
+          restore-keys: esphome-2026.9.1-
+      - name: Install ESPHome
+        run: pip install esphome==2026.9.1
+      # Build the checked-out component instead of the tagged GitHub source.
+      - name: Prepare configuration
+        run: |
+          mkdir -p build
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("packages/tygbot.yaml").read_text()
+          local = ("external_components:\n  - source:\n      type: local\n"
+                   f"      path: {Path('components').resolve()}\n    components: [tygbot]\n")
+          text, count = re.subn(r"external_components:\n(?:  .*\n)+", local, text)
+          assert count == 1
+          Path("build/tygbot.yaml").write_text(text)
+          PY
+      - name: Compile
+        run: esphome compile build/tygbot.yaml
+      - name: Collect firmware
+        run: |
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="$(git rev-parse --short HEAD)"
+          out=build/.esphome/build/tygbot/build
+          mkdir -p dist
+          cp "$out/firmware.factory.bin" "dist/tygbot-esp32c3-$version.factory.bin"
+          cp "$out/firmware.ota.bin" "dist/tygbot-esp32c3-$version.ota.bin"
+          cp tygbot.example.yaml dist/tygbot.yaml
+          (cd dist && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist/
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Release notes come from the annotated tag message; checkout keeps
+          # only the commit, so fetch the tag object first.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

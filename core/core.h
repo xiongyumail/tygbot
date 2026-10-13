@@ -1,0 +1,40 @@
+#pragma once
+#include <stdbool.h>
+#include <stddef.h>
+#include "cJSON.h"
+
+#define TG_MAX_JSON 16384
+#define TG_MAX_DOORS 16
+#define TG_DETAIL 192
+#define TG_EVENT_SIZE 384
+#define TG_EVENT_COUNT 8 /* SSE push queue, not a history; a reconnect also gets a snapshot. */
+#define TG_LOGGED_OUT "桃园谷未登录"
+
+typedef struct {
+    char code[128], number[16], name[96], id[64], group[96];
+} tg_door;
+typedef struct {
+    char token[256], mobile[12], household[128], organization[128];
+} tg_room;
+typedef struct {
+    char ssid[33], wifi_password[65], host[64];
+    char organization[128], household[128], door_code[128], door_number[16];
+    unsigned char salt[16], password_hash[32], cookie_key[32];
+    bool password_set;
+    char user_token[256], device_id[37];
+} tg_config;
+
+const char *tg_string(const cJSON *value, const char *key);
+cJSON *tg_parse_json(const char *text);
+bool tg_is_code(const cJSON *value, const char *key, const char *code);
+bool tg_copy(char *dest, size_t capacity, const char *value);
+bool tg_on_captive_interface(bool active, const char *local_ip, const char *ap_ip);
+bool tg_url_allowed(const char *url, bool image, bool ws);
+bool tg_phone_valid(const char *value);
+bool tg_code_valid(const char *value, bool allow_empty);
+bool tg_uums_ok(const cJSON *value, const char *code);
+bool tg_cps_ok(const cJSON *value);
+bool tg_open_ok(const cJSON *value);
+bool tg_select_room(const cJSON *value, const tg_config *config, tg_room *room, char *detail);
+bool tg_parse_doors(const cJSON *value, tg_door *doors, size_t *count, char *detail);
+bool tg_select_door(const tg_config *config, const tg_door *doors, size_t count, size_t *index);

@@ -1,0 +1,21 @@
+# Private device configuration and provisioning data
+/tygbot.yaml
+secrets.yaml
+secrets.yml
+.env
+.env.*
+*.pem
+*.key
+
+# Build products can embed API/OTA/Wi-Fi credentials
+.esphome/
+build/
+*.bin
+*.elf
+*.map
+*.log
+__pycache__/
+*.py[cod]
+
+# Historical household migration helper: kept locally, not published
+/deploy_config.py
