@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--cycles", type=int, default=20)
     parser.add_argument("--hold-seconds", type=int, default=70)
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument("--expected-version", default="1.0.0")
+    parser.add_argument("--expected-version", default="1.1.0")
     args = parser.parse_args()
     assert 1 <= args.cycles <= 30 and 5 <= args.hold_seconds <= 180
     url = args.url.rstrip("/")

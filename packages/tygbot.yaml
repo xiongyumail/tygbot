@@ -1,14 +1,14 @@
 substitutions:
   device_name: tygbot
   device_friendly_name: TYGBot
-  repository_ref: v1.0.0
+  repository_ref: v1.1.0
 
 esphome:
   name: ${device_name}
   friendly_name: ${device_friendly_name}
   project:
     name: xiongyu.tygbot
-    version: "1.0.0"
+    version: "1.1.0"
   compile_process_limit: 2
 
 esp32:
@@ -36,6 +36,9 @@ safe_mode:
 wifi:
   # Omit STA credentials to retain Wi-Fi provisioned into flash.
   reboot_timeout: 0s
+  # Roaming scans after connecting allocate scan results and leave the channel; with the
+  # door TLS and Bluetooth proxy running they drove free heap down to about 4 KB.
+  post_connect_roaming: false
   ap:
     ssid: ${device_name}-setup
   # Bluetooth scanning shares the radio; keep it off while the hotspot may be in use.
@@ -97,7 +100,7 @@ button:
     on_press:
       - lambda: id(tygbot_core).open(false);
   - platform: template
-    name: Door Check 门禁只读检查
+    name: Door Check 门禁检查（不开门）
     icon: mdi:connection
     entity_category: diagnostic
     on_press:
@@ -107,26 +110,77 @@ button:
     entity_category: diagnostic
     # Recovery control is disabled by default.
     disabled_by_default: true
+  - platform: template
+    name: Refresh Call 重新获取对讲配置
+    icon: mdi:phone-sync
+    entity_category: config
+    on_press:
+      - lambda: id(tygbot_core).refresh_call();
 
 binary_sensor:
   - platform: template
     name: Service Ready 服务就绪
+    device_class: connectivity
+    entity_category: diagnostic
     lambda: return id(tygbot_core).ready();
   - platform: template
     name: Logged In 桃园谷已登录
+    icon: mdi:account-check
     lambda: return id(tygbot_core).logged_in();
   - platform: template
-    name: Door Busy 开门请求处理中
+    name: Door Busy 开门处理中
+    icon: mdi:progress-clock
+    entity_category: diagnostic
     lambda: return id(tygbot_core).busy();
+  - platform: template
+    name: Door Call 门口机呼叫
+    device_class: occupancy
+    icon: mdi:doorbell
+    lambda: return id(tygbot_core).call_ringing();
+  - platform: template
+    name: Call Registered 对讲已注册
+    device_class: connectivity
+    entity_category: diagnostic
+    lambda: return id(tygbot_core).call_registered();
 
 text_sensor:
+  # Published only on change, so the API and log do not repeat unchanged text every 2 s.
   - platform: template
+    id: tygbot_status
     name: Status 状态
-    lambda: return id(tygbot_core).status();
+    icon: mdi:information-outline
+    lambda: |-
+      const auto &v = id(tygbot_core).status();
+      if (id(tygbot_status).has_state() && id(tygbot_status).state == v) return {};
+      return v;
     update_interval: 2s
   - platform: template
+    id: tygbot_last_door
     name: Last Door 最近开门结果
-    lambda: return id(tygbot_core).last_result();
+    icon: mdi:door
+    lambda: |-
+      const auto &v = id(tygbot_core).last_result();
+      if (id(tygbot_last_door).has_state() && id(tygbot_last_door).state == v) return {};
+      return v;
+    update_interval: 2s
+  - platform: template
+    id: tygbot_caller
+    name: Caller 呼叫来源
+    icon: mdi:phone-incoming
+    lambda: |-
+      const auto &v = id(tygbot_core).caller();
+      if (id(tygbot_caller).has_state() && id(tygbot_caller).state == v) return {};
+      return v;
+    update_interval: 2s
+  - platform: template
+    id: tygbot_call_status
+    name: Call Status 对讲状态
+    icon: mdi:phone-check
+    entity_category: diagnostic
+    lambda: |-
+      const auto &v = id(tygbot_core).call_status();
+      if (id(tygbot_call_status).has_state() && id(tygbot_call_status).state == v) return {};
+      return v;
     update_interval: 2s
 
 sensor:

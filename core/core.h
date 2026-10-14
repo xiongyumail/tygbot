@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "cJSON.h"
 
 #define TG_MAX_JSON 16384
@@ -24,6 +25,26 @@ typedef struct {
     char user_token[256], device_id[37];
 } tg_config;
 
+/* Talkback (door-station call) account; persisted under its own NVS key. */
+typedef struct {
+    char account[12], password_md5[33];
+} tg_talk_auth;
+typedef struct {
+    char account[64], password[64], domain[64], proxy[64];
+    int port;
+} tg_sip_config;
+/* SIP config cached in NVS, bound to the account that fetched it; avoids a TLS fetch on every boot. */
+typedef struct {
+    char owner[12];
+    tg_sip_config sip;
+} tg_sip_cache;
+/* Door-station call status shown in HA and the web page. */
+typedef struct {
+    bool registered, ringing;
+    char caller[64], detail[TG_DETAIL];
+    uint32_t stack_min_free;
+} tg_call_state;
+
 const char *tg_string(const cJSON *value, const char *key);
 cJSON *tg_parse_json(const char *text);
 bool tg_is_code(const cJSON *value, const char *key, const char *code);
@@ -38,3 +59,23 @@ bool tg_open_ok(const cJSON *value);
 bool tg_select_room(const cJSON *value, const tg_config *config, tg_room *room, char *detail);
 bool tg_parse_doors(const cJSON *value, tg_door *doors, size_t *count, char *detail);
 bool tg_select_door(const tg_config *config, const tg_door *doors, size_t count, size_t *index);
+
+void tg_md5_hex(const char *text, char out[33]);
+/* Login replies carry the account password Base64-encoded; only its MD5 is kept. */
+bool tg_talk_password(const char *encoded, char out[33]);
+/* Text of the first <tag>…</tag>, with the five XML entities decoded. */
+bool tg_xml_text(const char *xml, const char *tag, char *out, size_t capacity);
+bool tg_talk_config(const char *xml, int default_port, tg_sip_config *out, char *detail);
+
+/* Minimal SIP message helpers (RFC 3261), enough for REGISTER and ringing. */
+int tg_sip_status(const char *message);
+bool tg_sip_method(const char *message, char *out, size_t capacity);
+bool tg_sip_header(const char *message, const char *name, char *out, size_t capacity);
+/* Every `name` header as "name: value\r\n" lines, e.g. all Via headers for a response. */
+bool tg_sip_headers(const char *message, const char *name, char *out, size_t capacity);
+bool tg_sip_param(const char *value, const char *name, char *out, size_t capacity);
+bool tg_sip_user(const char *value, char *out, size_t capacity);
+/* Registration lifetime granted in a 200 OK: Contact ;expires= first, then Expires; else `fallback`. */
+int tg_sip_expires(const char *message, int fallback);
+void tg_sip_digest(const char *user, const char *realm, const char *password, const char *method, const char *uri,
+                   const char *nonce, const char *qop, const char *nc, const char *cnonce, char out[33]);

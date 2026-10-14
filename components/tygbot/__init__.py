@@ -2,8 +2,11 @@
 import hashlib
 import logging
 from pathlib import Path
+import re
+import subprocess
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.components import esp32, socket, web_server
 from esphome.const import CONF_ID, CONF_PASSWORD, __version__ as ESPHOME_VERSION
 from esphome.core import CORE
@@ -26,9 +29,23 @@ CONFIG_SCHEMA = cv.All(cv.Schema({
     cv.Optional("door_code", default=""): cv.All(cv.string_strict, cv.Length(max=127)),
     cv.Optional("door_number", default=""): cv.All(cv.string_strict, cv.Length(max=15)),
 }).extend(cv.polling_component_schema("2s")),
-    socket.consume_sockets(5, "tygbot"),  # 4 local clients + 1 upstream TLS
-    socket.consume_sockets(1, "tygbot", socket.SocketType.UDP),  # httpd control socket
+    socket.consume_sockets(6, "tygbot"),  # 4 local clients + door TLS + independent talkback TLS
+    socket.consume_sockets(2, "tygbot", socket.SocketType.UDP),  # httpd control socket + SIP
 )
+def build_commit():
+    """Short commit of the component checkout; empty outside git. Local edits add *."""
+    root = Path(__file__).resolve().parents[2]
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    try:
+        commit = git("rev-parse", "--short=5", "HEAD")
+        dirty = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{5,}", commit):
+        return ""
+    return commit + ("*" if dirty else "")
+
 def validate_framework(config):
     if not CORE.is_esp32 or CORE.using_arduino:
         raise cv.Invalid("TYGBot requires the ESP-IDF framework")
@@ -36,6 +53,11 @@ def validate_framework(config):
         raise cv.Invalid("password is required unless require_auth is false")
     if not ESPHOME_VERSION.startswith(TESTED_ESPHOME):
         _LOGGER.warning("TYGBot is tested with ESPHome %sx; found %s", TESTED_ESPHOME, ESPHOME_VERSION)
+    # HA shows the project version as the firmware: append the built commit, e.g. 1.1.0+a1b2c.
+    project = fv.full_config.get().get("esphome", {}).get("project")
+    commit = build_commit()
+    if commit and project and "+" not in project["version"]:
+        project["version"] += "+" + commit
     return config
 
 FINAL_VALIDATE_SCHEMA = validate_framework
@@ -44,6 +66,7 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.register_web())
+    cg.add_define("TG_BUILD_COMMIT", build_commit())
     # Advertise the web UI on ESPHome's shared server through the native
     # DeviceInfoResponse. ESPHome 2026.9.1 gates that protobuf field and IDF
     # EventSource declarations together. Provide the SDK declaration headers,

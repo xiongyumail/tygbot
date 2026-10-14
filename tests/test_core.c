@@ -50,5 +50,48 @@ int main(void) {
     CHECK(tg_password_hash("test-password",salt,digest));
     for (int i=0;i<32;i++) snprintf(hex+2*i,3,"%02x",digest[i]);
     CHECK(!strcmp(hex,"cb4208b8bb0ac07803f4ad2f3387c76f96e47f4516452abe44c24e68d93b43d4"));
+    /* Talkback: login password is Base64 ("123456"), only its MD5 is kept. */
+    char md5[33];
+    CHECK(tg_talk_password("MTIzNDU2", md5)); CHECK(!strcmp(md5, "e10adc3949ba59abbe56e057f20f883e"));
+    CHECK(!tg_talk_password("", md5)); CHECK(!tg_talk_password("!!!", md5)); CHECK(!*md5);
+    char text[64];
+    CHECK(tg_xml_text("<message><safeCode>a&amp;b</safeCode></message>", "safeCode", text, sizeof(text))); CHECK(!strcmp(text, "a&b"));
+    CHECK(tg_xml_text("<message><faultText/></message>", "faultText", text, sizeof(text))); CHECK(!*text);
+    CHECK(!tg_xml_text("<message><safeCode>x</message>", "safeCode", text, sizeof(text)));
+    CHECK(!tg_xml_text("<a>&bogus;</a>", "a", text, sizeof(text)));
+    CHECK(!tg_xml_text("<a>0123456789</a>", "a", text, 8));
+    tg_sip_config sip;
+    const char *xml = "<message><faultCode>0</faultCode><SIP_ACCOUNT>8001</SIP_ACCOUNT><SIP_PASSWORD>fake-pass</SIP_PASSWORD>"
+        "<SIP_DOMAIN>192.0.2.7</SIP_DOMAIN><SIP_PROXY></SIP_PROXY><SIP_PROXY_PORT>6000</SIP_PROXY_PORT></message>";
+    CHECK(tg_talk_config(xml, 5060, &sip, detail)); CHECK(!strcmp(sip.proxy, "192.0.2.7")); CHECK(sip.port == 6000);
+    CHECK(!tg_talk_config("<message><faultCode>3</faultCode><faultText>no</faultText></message>", 6000, &sip, detail)); CHECK(strstr(detail, "no"));
+    CHECK(!tg_talk_config("<message><SIP_ACCOUNT>a b</SIP_ACCOUNT><SIP_PASSWORD>p</SIP_PASSWORD><SIP_DOMAIN>d</SIP_DOMAIN></message>", 6000, &sip, detail));
+    CHECK(!tg_talk_config("<message><SIP_ACCOUNT>a</SIP_ACCOUNT><SIP_PASSWORD>p</SIP_PASSWORD><SIP_DOMAIN>evil/x</SIP_DOMAIN></message>", 6000, &sip, detail));
+    CHECK(!*sip.password);
+    /* SIP parsing, including compact header names and every Via. */
+    const char *invite = "INVITE sip:8001@192.0.2.20:5070 SIP/2.0\r\nv: SIP/2.0/UDP 192.0.2.7:6000;branch=z9hG4bK1;rport\r\n"
+        "Via: SIP/2.0/UDP 192.0.2.30;branch=z9hG4bK2\r\nFrom: \"Door\" <sip:9001@192.0.2.7>;tag=abc\r\nTo: <sip:8001@192.0.2.7>\r\n"
+        "Call-ID: id-1\r\nCSeq: 1 INVITE\r\nl: 0\r\n\r\n";
+    char via[256], value[64];
+    CHECK(tg_sip_status(invite) == 0); CHECK(tg_sip_method(invite, value, sizeof(value))); CHECK(!strcmp(value, "INVITE"));
+    CHECK(tg_sip_headers(invite, "Via", via, sizeof(via))); CHECK(!strncmp(via, "Via: SIP/2.0/UDP 192.0.2.7:6000", 31)); CHECK(strstr(via, "z9hG4bK2"));
+    CHECK(!tg_sip_headers(invite, "Via", via, 40));
+    CHECK(tg_sip_header(invite, "From", value, sizeof(value))); CHECK(tg_sip_user(value, text, sizeof(text))); CHECK(!strcmp(text, "9001"));
+    CHECK(tg_sip_param(value, "tag", text, sizeof(text))); CHECK(!strcmp(text, "abc"));
+    CHECK(tg_sip_header(invite, "Content-Length", value, sizeof(value))); CHECK(!strcmp(value, "0"));
+    CHECK(!tg_sip_header(invite, "Contact", value, sizeof(value)));
+    CHECK(tg_sip_status("SIP/2.0 401 Unauthorized\r\n\r\n") == 401); CHECK(tg_sip_status("SIP/2.0 4x1 Bad\r\n") == 0);
+    CHECK(tg_sip_param("Digest realm=\"r\", nonce=\"n1\", qop=\"auth\"", "nonce", text, sizeof(text))); CHECK(!strcmp(text, "n1"));
+    CHECK(tg_sip_param("SIP/2.0/UDP 10.0.0.2:5070;rport=4321;received=198.51.100.9", "received", text, sizeof(text))); CHECK(!strcmp(text, "198.51.100.9"));
+    CHECK(tg_sip_param("SIP/2.0/UDP 10.0.0.2;rport;branch=x", "rport", text, sizeof(text))); CHECK(!*text);
+    CHECK(!tg_sip_param("SIP/2.0/UDP 10.0.0.2;xrport=1", "rport", text, sizeof(text)));
+    CHECK(!tg_sip_user("<sip:no-host>", text, sizeof(text)));
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@192.0.2.20:5070>;expires=120\r\nExpires: 3600\r\n\r\n", 3600) == 120);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 300\r\n\r\n", 3600) == 300);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nm: <sip:8001@192.0.2.20>\r\n\r\n", 3600) == 3600);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 9x\r\n\r\n", 3600) == 3600);
+    /* RFC 2617 section 3.5 example. */
+    tg_sip_digest("Mufasa", "testrealm@host.com", "Circle Of Life", "GET", "/dir/index.html", "dcd98b7102dd2f0e8b11d0f600bfb0c093", "auth", "00000001", "0a4f113b", md5);
+    CHECK(!strcmp(md5, "6629fae49393a05397450978507c4ef1"));
     printf("%u core assertions passed; no network or OpenDoor sent\n",tests); return 0;
 }

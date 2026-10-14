@@ -3,6 +3,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <strings.h>
+#include "mbedtls/md5.h"
+#include "mbedtls/base64.h"
 
 bool tg_on_captive_interface(bool active, const char *local_ip, const char *ap_ip) {
     return active && local_ip && ap_ip && *ap_ip && !strcmp(local_ip, ap_ip);
@@ -177,4 +180,201 @@ bool tg_select_door(const tg_config *cfg, const tg_door *doors, size_t count, si
         *index = i; found++;
     }
     return found == 1;
+}
+
+/* Hex without printf keeps the SIP task's deepest call chain short. */
+static void hex_digest(const unsigned char hash[16], char out[33]) {
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) { out[i * 2] = digits[hash[i] >> 4]; out[i * 2 + 1] = digits[hash[i] & 15]; }
+    out[32] = 0;
+}
+void tg_md5_hex(const char *text, char out[33]) {
+    unsigned char hash[16]; mbedtls_md5((const unsigned char *)text, strlen(text), hash);
+    hex_digest(hash, out);
+}
+bool tg_talk_password(const char *encoded, char out[33]) {
+    unsigned char plain[96]; size_t length = 0;
+    *out = 0;
+    if (!encoded || !*encoded || strlen(encoded) > 128) return false;
+    if (mbedtls_base64_decode(plain, sizeof(plain) - 1, &length, (const unsigned char *)encoded, strlen(encoded)) || !length) return false;
+    plain[length] = 0;
+    bool ok = strlen((char *)plain) == length;
+    if (ok) tg_md5_hex((char *)plain, out);
+    memset(plain, 0, sizeof(plain)); return ok;
+}
+bool tg_xml_text(const char *xml, const char *tag, char *out, size_t cap) {
+    char open[48], close[48]; *out = 0;
+    if (!xml || snprintf(open, sizeof(open), "<%s>", tag) >= (int)sizeof(open)) return false;
+    snprintf(close, sizeof(close), "</%s>", tag);
+    const char *start = strstr(xml, open);
+    if (!start) {
+        snprintf(open, sizeof(open), "<%s/>", tag);
+        return strstr(xml, open) != NULL;
+    }
+    start += strlen(open);
+    const char *end = strstr(start, close);
+    if (!end) return false;
+    static const char *const names[] = {"&amp;", "&lt;", "&gt;", "&quot;", "&apos;"}, chars[] = "&<>\"'";
+    size_t used = 0;
+    for (const char *p = start; p < end; ) {
+        char c = *p; size_t step = 1;
+        if (c == '&') {
+            unsigned i = 0;
+            while (i < 5 && strncmp(p, names[i], strlen(names[i]))) i++;
+            if (i == 5) return false;
+            c = chars[i]; step = strlen(names[i]);
+        }
+        if (used + 1 >= cap) { *out = 0; return false; }
+        out[used++] = c; p += step;
+    }
+    out[used] = 0; return true;
+}
+static bool host_valid(const char *v) {
+    if (!*v) return false;
+    for (; *v; v++) if (!isalnum((unsigned char)*v) && *v != '.' && *v != '-') return false;
+    return true;
+}
+bool tg_talk_config(const char *xml, int default_port, tg_sip_config *out, char *detail) {
+    char fault[16], port[8];
+    memset(out, 0, sizeof(*out));
+    if (tg_xml_text(xml, "faultCode", fault, sizeof(fault)) && *fault && strcmp(fault, "0")) {
+        char text[96] = ""; tg_xml_text(xml, "faultText", text, sizeof(text));
+        snprintf(detail, TG_DETAIL, "对讲配置被拒绝：%s %.80s", fault, text); return false;
+    }
+    if (!tg_xml_text(xml, "SIP_ACCOUNT", out->account, sizeof(out->account)) || !*out->account
+        || !tg_xml_text(xml, "SIP_PASSWORD", out->password, sizeof(out->password)) || !*out->password
+        || !tg_xml_text(xml, "SIP_DOMAIN", out->domain, sizeof(out->domain))) {
+        tg_copy(detail, TG_DETAIL, "对讲配置缺少 SIP 账号"); memset(out, 0, sizeof(*out)); return false;
+    }
+    if (!tg_xml_text(xml, "SIP_PROXY", out->proxy, sizeof(out->proxy)) || !*out->proxy) strcpy(out->proxy, out->domain);
+    if (!*out->domain) strcpy(out->domain, out->proxy);
+    out->port = default_port;
+    if (tg_xml_text(xml, "SIP_PROXY_PORT", port, sizeof(port)) && *port) {
+        char *end; long n = strtol(port, &end, 10);
+        if (*end || n < 1 || n > 65535) { tg_copy(detail, TG_DETAIL, "对讲端口无效"); memset(out, 0, sizeof(*out)); return false; }
+        out->port = (int)n;
+    }
+    for (const char *p = out->account; *p; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("._-+", *p)) { tg_copy(detail, TG_DETAIL, "对讲账号格式无效"); memset(out, 0, sizeof(*out)); return false; }
+    for (const char *p = out->password; *p; p++)
+        if ((unsigned char)*p < 32 || *p == '"' || *p == '\\') { tg_copy(detail, TG_DETAIL, "对讲密码格式无效"); memset(out, 0, sizeof(*out)); return false; }
+    if (!host_valid(out->domain) || !host_valid(out->proxy)) { tg_copy(detail, TG_DETAIL, "对讲服务器地址无效"); memset(out, 0, sizeof(*out)); return false; }
+    return true;
+}
+
+int tg_sip_status(const char *m) {
+    if (!m || strncmp(m, "SIP/2.0 ", 8) || !isdigit((unsigned char)m[8]) || !isdigit((unsigned char)m[9]) || !isdigit((unsigned char)m[10])) return 0;
+    return (m[8] - '0') * 100 + (m[9] - '0') * 10 + (m[10] - '0');
+}
+bool tg_sip_method(const char *m, char *out, size_t cap) {
+    size_t n = 0; *out = 0;
+    if (!m) return false;
+    while (m[n] >= 'A' && m[n] <= 'Z') n++;
+    if (!n || m[n] != ' ' || n >= cap) return false;
+    memcpy(out, m, n); out[n] = 0; return true;
+}
+static const char *compact_name(const char *name) {
+    static const char *const map[][2] = {{"Via","v"},{"From","f"},{"To","t"},{"Call-ID","i"},{"Contact","m"},{"Content-Length","l"},{"Content-Type","c"}};
+    for (unsigned i = 0; i < sizeof(map) / sizeof(*map); i++) if (!strcasecmp(name, map[i][0])) return map[i][1];
+    return NULL;
+}
+/* Calls visit(value, length) for each header line named `name`; stops at the blank line. */
+static bool each_header(const char *m, const char *name, bool (*visit)(const char *, size_t, void *), void *context) {
+    const char *alt = compact_name(name), *line = m ? strstr(m, "\r\n") : NULL;
+    while (line) {
+        line += 2;
+        if (!strncmp(line, "\r\n", 2) || !*line) break;
+        const char *eol = strstr(line, "\r\n"), *colon = memchr(line, ':', eol ? (size_t)(eol - line) : strlen(line));
+        if (!eol || !colon) break;
+        size_t n = (size_t)(colon - line);
+        while (n && line[n - 1] == ' ') n--;
+        if ((strlen(name) == n && !strncasecmp(line, name, n)) || (alt && n == 1 && tolower((unsigned char)*line) == *alt)) {
+            const char *v = colon + 1;
+            while (v < eol && (*v == ' ' || *v == '\t')) v++;
+            size_t len = (size_t)(eol - v);
+            while (len && (v[len - 1] == ' ' || v[len - 1] == '\t')) len--;
+            if (!visit(v, len, context)) return false;
+        }
+        line = eol;
+    }
+    return true;
+}
+typedef struct { char *out; size_t cap; bool found; } first_header;
+static bool take_first(const char *v, size_t len, void *context) {
+    first_header *f = context;
+    if (len >= f->cap) return false;
+    memcpy(f->out, v, len); f->out[len] = 0; f->found = true; return false;
+}
+bool tg_sip_header(const char *m, const char *name, char *out, size_t cap) {
+    first_header f = {out, cap, false}; *out = 0;
+    each_header(m, name, take_first, &f); return f.found;
+}
+typedef struct { const char *name; char *out; size_t cap, used; bool ok; } all_headers;
+static bool append_header(const char *v, size_t len, void *context) {
+    all_headers *a = context;
+    int n = snprintf(a->out + a->used, a->cap - a->used, "%s: %.*s\r\n", a->name, (int)len, v);
+    if (n < 0 || (size_t)n >= a->cap - a->used) { a->ok = false; return false; }
+    a->used += (size_t)n; return true;
+}
+bool tg_sip_headers(const char *m, const char *name, char *out, size_t cap) {
+    all_headers a = {name, out, cap, 0, true}; *out = 0;
+    each_header(m, name, append_header, &a);
+    if (!a.ok) *out = 0;
+    return a.ok && a.used;
+}
+bool tg_sip_param(const char *v, const char *name, char *out, size_t cap) {
+    size_t n = strlen(name); *out = 0;
+    for (const char *p = v; p && *p; p++) {
+        if (p != v && !strchr(";, \t", p[-1])) continue;
+        if (strncasecmp(p, name, n) || (p[n] && !strchr("=;, \t>", p[n]))) continue;
+        const char *value = p + n;
+        if (*value != '=') return true;  /* flag parameter such as rport */
+        value++;
+        size_t len;
+        if (*value == '"') { value++; const char *q = strchr(value, '"'); if (!q) return false; len = (size_t)(q - value); }
+        else len = strcspn(value, ";, \t>");
+        if (len >= cap) return false;
+        memcpy(out, value, len); out[len] = 0; return true;
+    }
+    return false;
+}
+bool tg_sip_user(const char *v, char *out, size_t cap) {
+    const char *p = v ? strstr(v, "sip:") : NULL; *out = 0;
+    if (!p) return false;
+    p += 4;
+    size_t len = strcspn(p, "@;>: ");
+    if (!len || len >= cap || p[len] != '@') return false;
+    memcpy(out, p, len); out[len] = 0; return true;
+}
+int tg_sip_expires(const char *m, int fallback) {
+    char value[256], number[16];
+    if (tg_sip_header(m, "Contact", value, sizeof(value)) && tg_sip_param(value, "expires", number, sizeof(number)) && *number) {
+        char *end; long n = strtol(number, &end, 10);
+        if (!*end && n >= 0 && n <= 86400) return (int)n;
+    }
+    if (tg_sip_header(m, "Expires", number, sizeof(number)) && *number) {
+        char *end; long n = strtol(number, &end, 10);
+        if (!*end && n >= 0 && n <= 86400) return (int)n;
+    }
+    return fallback;
+}
+/* MD5 over "a:b:..." fed piece by piece, so no text buffer or printf is needed. */
+static void md5_join(const char *const *parts, size_t count, char out[33]) {
+    mbedtls_md5_context ctx; unsigned char hash[16];
+    mbedtls_md5_init(&ctx); mbedtls_md5_starts(&ctx);
+    for (size_t i = 0; i < count; i++) {
+        if (i) mbedtls_md5_update(&ctx, (const unsigned char *)":", 1);
+        mbedtls_md5_update(&ctx, (const unsigned char *)parts[i], strlen(parts[i]));
+    }
+    mbedtls_md5_finish(&ctx, hash); mbedtls_md5_free(&ctx);
+    hex_digest(hash, out); memset(hash, 0, sizeof(hash));
+}
+void tg_sip_digest(const char *user, const char *realm, const char *password, const char *method, const char *uri,
+                   const char *nonce, const char *qop, const char *nc, const char *cnonce, char out[33]) {
+    char ha1[33], ha2[33];
+    const char *a1[] = {user, realm, password}, *a2[] = {method, uri};
+    md5_join(a1, 3, ha1); md5_join(a2, 2, ha2);
+    const char *with_qop[] = {ha1, nonce, nc, cnonce, qop, ha2}, *plain[] = {ha1, nonce, ha2};
+    if (qop && *qop) md5_join(with_qop, 6, out); else md5_join(plain, 3, out);
+    memset(ha1, 0, sizeof(ha1));
 }

@@ -27,8 +27,10 @@ static size_t rx_len, rx_cap, frame_len;
 static bool waiting;
 static char expected[32];
 static tg_room room;
-static tg_door doors[TG_MAX_DOORS];
+/* Only the configured door stays resident; the full list lives on the heap during a refresh. */
+static tg_door door;
 static size_t door_count;
+static bool door_unique;
 static int64_t refreshed, discovered;
 static char uums[256], cps[256], vdcs[256];
 static char pending_phone[12];
@@ -40,7 +42,7 @@ static void ws_close(void) {
     if (ws) { esp_websocket_client_stop(ws); esp_websocket_client_destroy(ws); ws = NULL; }
     xEventGroupClearBits(events, WS_UP | WS_DONE | WS_FAIL);
 }
-static void invalidate(void) { memset(&room, 0, sizeof(room)); door_count = 0; refreshed = 0; ws_close(); }
+static void invalidate(void) { memset(&room, 0, sizeof(room)); memset(&door, 0, sizeof(door)); door_count = 0; door_unique = false; refreshed = 0; ws_close(); }
 /* Keep the stored session: the next check re-validates it, so a misread reply costs no SMS login. */
 static void session_rejected(void) { invalidate(); tg_login_note(0, false); }
 /* The worker owns protocol operations. Callback never stops/destroys its own client. */
@@ -178,17 +180,23 @@ static bool discover(char *detail) {
     if (*uums && esp_timer_get_time() - discovered < 3600000000LL) return true;
     cJSON *v = post("https://uums.taoyuangu.com:8443", "/uums/servlet/getAllConfigsServlet", cJSON_CreateObject(), NULL, detail);
     bool ok = tg_uums_ok(v, NULL);
-    char next_uums[256] = "", next_cps[256] = "", next_vdcs[256] = "";
+    char next_uums[256] = "", next_cps[256] = "", next_vdcs[256] = "", next_talk[256] = "";
+    int next_port = 0;
     cJSON *configs = cJSON_GetObjectItemCaseSensitive(v, "serverConfigs"), *item;
     if (!cJSON_IsArray(configs)) ok = false;
     cJSON_ArrayForEach(item, configs) {
         const char *key = tg_string(item, "key"), *url = tg_string(item, "value");
         char *target = !strcmp(key, "uums_server") ? next_uums : !strcmp(key, "cpsApi_server") ? next_cps : !strcmp(key, "htmlvdcs_server") ? next_vdcs : NULL;
         if (target && (!tg_url_allowed(url, false, false) || !tg_copy(target, 256, url))) ok = false;
+        /* Door-station call platform; optional, so its absence does not fail discovery. */
+        if (!strcmp(key, "outerTalkbackSystemUrl") && tg_url_allowed(url, false, false)) tg_copy(next_talk, sizeof(next_talk), url);
+        if (!strcmp(key, "outerTalkbackSipPort")) { char *end; long n = strtol(url, &end, 10); if (!*end && n > 0 && n < 65536) next_port = (int)n; }
     }
     cJSON_Delete(v);
     if (!ok || !*next_uums || !*next_cps || !*next_vdcs) { error(detail, "官方服务发现失败"); return false; }
-    strcpy(uums, next_uums); strcpy(cps, next_cps); strcpy(vdcs, next_vdcs); discovered = esp_timer_get_time(); return true;
+    strcpy(uums, next_uums); strcpy(cps, next_cps); strcpy(vdcs, next_vdcs);
+    tg_talk_endpoint(next_talk, next_port ? next_port : 6000);
+    discovered = esp_timer_get_time(); return true;
 }
 static cJSON *query_households(char *detail) {
     if (!*tg_cfg.user_token) { error(detail, TG_LOGGED_OUT); tg_login_note(0, false); return NULL; }
@@ -218,11 +226,25 @@ static cJSON *exchange(const char *kind, cJSON *body, char *detail, double *repl
     free(rx); rx = NULL; xSemaphoreGive(rx_lock);
     if (!v) {
         invalidate();
-        error(detail, !strcmp(kind, "OpenDoor") ? "开门结果未知（未收到确认），没有自动重发" : "门禁配置查询失败，未重试");
+        if (!strcmp(kind, "OpenDoor")) {
+            const char *reason = !send_ok ? "发送未完成" : (bits & WS_FAIL) ? "连接中断或接收失败" : (bits & WS_DONE) ? "确认解析失败" : "等待确认超时";
+            snprintf(detail, TG_DETAIL, "开门结果未知（未收到确认），没有自动重发；%s", reason);
+        } else error(detail, "门禁配置查询失败，未重试");
     }
     return v;
 }
-bool tg_refresh(bool force, char *detail) {
+static cJSON *doors_json(const tg_door *doors, size_t count) {
+    cJSON *result = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "code", doors[i].code); cJSON_AddStringToObject(d, "number", doors[i].number);
+        cJSON_AddStringToObject(d, "name", doors[i].name); cJSON_AddStringToObject(d, "id", doors[i].id); cJSON_AddStringToObject(d, "group", doors[i].group);
+        cJSON_AddItemToArray(result, d);
+    }
+    return result;
+}
+/* `list`, when given, receives every offered door for the web page. */
+static bool refresh(bool force, char *detail, cJSON **list) {
     if (!force && door_count && esp_timer_get_time() - refreshed < 240000000LL && ws && esp_websocket_client_is_connected(ws)) return true;
     invalidate();
     cJSON *v = query_households(detail);
@@ -244,16 +266,25 @@ bool tg_refresh(bool force, char *detail) {
     }
     cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "mobile", room.mobile); cJSON_AddStringToObject(body, "organizationSeq", room.organization);
     v = exchange("MobileDownloadConfig", body, detail, NULL);
-    ok = v && tg_parse_doors(v, doors, &door_count, detail); cJSON_Delete(v);
+    tg_door *doors = v ? calloc(TG_MAX_DOORS, sizeof(tg_door)) : NULL;
+    if (v && !doors) error(detail, "门禁列表内存不足");
+    ok = doors && tg_parse_doors(v, doors, &door_count, detail); cJSON_Delete(v);
+    if (ok) {
+        size_t selected = 0;
+        door_unique = tg_select_door(&tg_cfg, doors, door_count, &selected);
+        if (door_unique) door = doors[selected];
+        if (list) *list = doors_json(doors, door_count);
+    }
+    free(doors);
     if (!ok) { invalidate(); return false; }
     refreshed = esp_timer_get_time(); tg_login_note(1, false); error(detail, "登录和门禁连接正常"); return true;
 }
+bool tg_refresh(bool force, char *detail) { return refresh(force, detail, NULL); }
 bool tg_open(bool dry, char *detail, double *reply_wait) {
     if (!tg_refresh(dry, detail)) return false;
-    size_t selected = 0;
-    if (!tg_select_door(&tg_cfg, doors, door_count, &selected)) { error(detail, "门禁不唯一，请配置 door_code/door_number"); return false; }
+    if (!door_unique) { error(detail, "门禁不唯一，请配置 door_code/door_number"); return false; }
     if (dry) { error(detail, "登录、授权和门禁连接已验证；没有发送开门指令"); return true; }
-    const tg_door *d = &doors[selected];
+    const tg_door *d = &door;
     cJSON *body = cJSON_CreateObject();
     cJSON_AddStringToObject(body, "clientType", "2"); cJSON_AddStringToObject(body, "code", d->code);
     cJSON_AddStringToObject(body, "number", d->number); cJSON_AddStringToObject(body, "mobile", room.mobile);
@@ -316,10 +347,22 @@ bool tg_login_sms(const char *code, bool *linked, char *detail) {
     cJSON *v = post(uums, "/uums/servlet/smsUserLogin", body, NULL, detail);
     if (!v) return false;
     bool ok = tg_uums_ok(v, "0") && *tg_string(v, "token") && tg_copy(tg_cfg.user_token, sizeof(tg_cfg.user_token), tg_string(v, "token"));
-    bool wrong = tg_uums_ok(v, "2"); cJSON_Delete(v);
+    bool wrong = tg_uums_ok(v, "2");
+    /* Keep the door-station call account too: username is the phone, password is Base64 in the reply. */
+    if (ok) {
+        char md5[33]; tg_talk_auth auth = {0};
+        if (tg_copy(auth.account, sizeof(auth.account), pending_phone) && tg_talk_password(tg_string(v, "password"), md5))
+            tg_copy(auth.password_md5, sizeof(auth.password_md5), md5);
+        xSemaphoreTake(tg_state_lock, portMAX_DELAY); tg_talk = auth; xSemaphoreGive(tg_state_lock);
+        memset(&auth, 0, sizeof(auth)); memset(md5, 0, sizeof(md5));
+    }
+    cJSON_Delete(v);
     if (!ok) { error(detail, wrong ? "短信验证码错误" : "短信登录被服务器拒绝"); return false; }
     if (!tg_storage_save()) { error(detail, "登录会话存储失败"); return false; }
+    /* Saved even when incomplete, so a previous account is never reused for another login. */
+    tg_talk_save();
     pending_stage = 0; invalidate(); tg_login_note(1, true);
+    tg_talk_request();  /* refresh door-station call config under the new account */
     *linked = tg_refresh(true, detail); return true;
 }
 cJSON *tg_households(char *detail) {
@@ -341,13 +384,7 @@ cJSON *tg_households(char *detail) {
     cJSON_Delete(v); tg_login_note(1, false); return result;
 }
 cJSON *tg_doors(char *detail) {
-    if (!tg_refresh(true, detail)) return NULL;
-    cJSON *result = cJSON_CreateArray();
-    for (size_t i = 0; i < door_count; i++) {
-        cJSON *d = cJSON_CreateObject();
-        cJSON_AddStringToObject(d, "code", doors[i].code); cJSON_AddStringToObject(d, "number", doors[i].number);
-        cJSON_AddStringToObject(d, "name", doors[i].name); cJSON_AddStringToObject(d, "id", doors[i].id); cJSON_AddStringToObject(d, "group", doors[i].group);
-        cJSON_AddItemToArray(result, d);
-    }
+    cJSON *result = NULL;
+    if (!refresh(true, detail, &result)) { cJSON_Delete(result); return NULL; }
     return result;
 }

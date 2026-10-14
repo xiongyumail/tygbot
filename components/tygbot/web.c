@@ -26,12 +26,12 @@ extern const unsigned char events_start[];
 extern const unsigned int events_size;
 extern const unsigned char setup_start[];
 extern const unsigned int setup_size;
-#define TG_SSE_STACK_BYTES 8192
-#define TG_WEB_VERSION "1.0.0"
+#define TG_SSE_STACK_BYTES 6144
+#define TG_WEB_VERSION "1.1.0"
 typedef struct { uint32_t sequence; char kind[16], data[TG_EVENT_SIZE]; } event_record;
 static event_record history[TG_EVENT_COUNT];
 static uint32_t sequence;
-static char boot[9], last_door[TG_EVENT_SIZE];
+static char boot[9], last_door[TG_EVENT_SIZE], last_door_detail[TG_DETAIL], last_door_at[24];
 static int login = -1;
 static time_t login_at;
 static bool busy;
@@ -77,6 +77,14 @@ void tg_login_note(int state, bool relogin) {
     cJSON_AddBoolToObject(v, "ok", state == 1); cJSON_AddNumberToObject(v, "ts", time(NULL)); cJSON_AddStringToObject(v, "at", at);
     tg_event("login", v); cJSON_Delete(v);
 }
+void tg_door_status_get(tg_door_status *out) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    out->busy = busy; out->login = login;
+    out->has_door = *last_door_detail != 0;
+    tg_copy(out->door_detail, sizeof(out->door_detail), last_door_detail); tg_copy(out->door_at, sizeof(out->door_at), last_door_at);
+    out->has_warm = *warm_at != 0; tg_copy(out->warm_detail, sizeof(out->warm_detail), warm_detail);
+    xSemaphoreGive(tg_state_lock);
+}
 void tg_set_busy(bool value) { xSemaphoreTake(tg_state_lock, portMAX_DELAY); busy = value; xSemaphoreGive(tg_state_lock); }
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source) {
     cJSON *v = cJSON_CreateObject(); char at[24]; tg_timestamp(at, sizeof(at), false);
@@ -86,6 +94,7 @@ void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait
     char *text = cJSON_PrintUnformatted(v);
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
     if (text) tg_copy(last_door, sizeof(last_door), text);
+    tg_copy(last_door_detail, sizeof(last_door_detail), detail); tg_copy(last_door_at, sizeof(last_door_at), at);
     xSemaphoreGive(tg_state_lock); free(text); tg_event("door", v); cJSON_Delete(v);
 }
 cJSON *tg_snapshot(void) {
@@ -104,7 +113,14 @@ cJSON *tg_snapshot(void) {
         cJSON_AddBoolToObject(warm, "ok", warm_ok); cJSON_AddStringToObject(warm, "detail", warm_detail); cJSON_AddItemToObject(v, "last_warm_up", warm);
     } else cJSON_AddNullToObject(v, "last_warm_up");
     cJSON_AddStringToObject(v, "version", TG_WEB_VERSION);
+    cJSON_AddStringToObject(v, "commit", tg_build_commit);
     xSemaphoreGive(tg_state_lock);
+    tg_call_state state; tg_sip_state(&state);
+    cJSON *call = cJSON_CreateObject();
+    cJSON_AddBoolToObject(call, "registered", state.registered);
+    cJSON_AddBoolToObject(call, "ringing", state.ringing);
+    cJSON_AddStringToObject(call, "caller", state.caller); cJSON_AddStringToObject(call, "detail", state.detail);
+    cJSON_AddItemToObject(v, "call", call);
     return v;
 }
 static esp_err_t respond(httpd_req_t *req, int code, cJSON *v) {
@@ -395,7 +411,17 @@ esp_err_t tg_web_setup_page(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (path_is(req, "/icon.png")) { httpd_resp_set_type(req, "image/png"); return httpd_resp_send(req, (const char *)icon_start, icon_size); }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, (const char *)setup_start, setup_size);
+    /* The hotspot page shows the version and build commit, filled in when served. */
+    static const char mark[] = "__TG_VERSION__";
+    const char *page = (const char *)setup_start, *at = NULL;
+    size_t size = setup_size, mark_len = sizeof(mark) - 1;
+    for (size_t i = 0; i + mark_len <= size && !at; i++) if (!memcmp(page + i, mark, mark_len)) at = page + i;
+    if (!at) return httpd_resp_send(req, page, size);
+    char version[40];
+    snprintf(version, sizeof(version), *tg_build_commit ? "%s (%s)" : "%s", TG_WEB_VERSION, tg_build_commit);
+    if (httpd_resp_send_chunk(req, page, at - page) != ESP_OK || httpd_resp_send_chunk(req, version, strlen(version)) != ESP_OK
+        || httpd_resp_send_chunk(req, at + mark_len, page + size - at - mark_len) != ESP_OK) return ESP_FAIL;
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 static esp_err_t handle(httpd_req_t *req, const char *body) {
     char path[64]; const char *question = strchr(req->uri, '?'); size_t len = question ? (size_t)(question - req->uri) : strlen(req->uri);
@@ -422,6 +448,7 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
             cJSON *v = cJSON_CreateObject();
             cJSON_AddStringToObject(v, "target", "esp32c3"); cJSON_AddStringToObject(v, "version", TG_WEB_VERSION);
             cJSON_AddStringToObject(v, "web_version", TG_WEB_VERSION);
+            cJSON_AddStringToObject(v, "commit", tg_build_commit);
             cJSON_AddNumberToObject(v, "http_port", TG_HTTP_PORT);
             cJSON_AddNumberToObject(v, "uptime_seconds", esp_timer_get_time() / 1000000.0);
             cJSON_AddNumberToObject(v, "reset_reason", esp_reset_reason());
@@ -435,6 +462,9 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
             cJSON_AddNumberToObject(v, "sse_opened", sse_opened); cJSON_AddNumberToObject(v, "sse_closed", sse_closed);
             cJSON_AddNumberToObject(v, "sse_active", sse_opened - sse_closed);
             xSemaphoreGive(tg_state_lock);
+            tg_call_state call; tg_sip_state(&call);
+            if (call.stack_min_free == UINT32_MAX) cJSON_AddNullToObject(v, "sip_stack_min_free");
+            else cJSON_AddNumberToObject(v, "sip_stack_min_free", call.stack_min_free);
             cJSON_AddBoolToObject(v, "time_ready", tg_time_ready());
             cJSON_AddNumberToObject(v, "heap_free", heap_caps_get_free_size(MALLOC_CAP_8BIT));
             cJSON_AddNumberToObject(v, "heap_min", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));

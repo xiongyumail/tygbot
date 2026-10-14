@@ -105,6 +105,7 @@
       <span id="label">开门</span>
     </button>
     <div id="msg" role="status" aria-live="polite"></div>
+    <div id="call" class="notice" role="status" aria-live="polite" hidden></div>
   </section>
 
   <section class="card">
@@ -196,7 +197,7 @@ function setDoor(state) {      // idle / off / busy / done
 }
 
 // 状态靠 /events 推送：连上先收 snapshot，之后 door_start / door / login 增量更新
-const S = { login: null, last_door: null, version: null };
+const S = { login: null, last_door: null, version: null, commit: '', call: null };
 let mine = false;   // 本页发起的开门：按钮和提示由点击流程管
 
 function render() {
@@ -213,7 +214,10 @@ function render() {
   } else last.textContent = '—';
   say($('loginState'), loggedOut ? '未登录' : S.login ? '已登录' : '—', loggedOut ? 'bad' : '');
   $('relogin').hidden = loggedOut || !$('login').hidden;
-  $('ver').textContent = S.version ? ' · v' + S.version : '';
+  $('ver').textContent = S.version ? ' · v' + S.version + (S.commit ? ' (' + S.commit + ')' : '') : '';
+  const c = S.call, callBanner = $('call');
+  callBanner.textContent = c && c.ringing ? '门口机呼叫中' + (c.caller ? '：' + c.caller : '') : '';
+  callBanner.hidden = !(c && c.ringing);
   if (loggedOut) showLogin(false);
 }
 
@@ -227,6 +231,7 @@ const stream = new TYGBotStream({
   onDisconnected: () => setBadge('连接恢复中', 'bad'),
   events: {
     login: l => { S.login = l; render(); },
+    call: c => { S.call = c; render(); },
     door_start: () => { if (!mine) { clearTimeout(doneTimer); setDoor('busy'); } render(); },
     door: d => {
       S.last_door = d;

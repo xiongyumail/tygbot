@@ -73,14 +73,14 @@ class SourceContract(unittest.TestCase):
         self.assertFalse((ROOT / "ha-login-card.yaml").exists())
 
     def test_core_sync_preserves_protocol_and_auth(self):
-        for name in ("core.c", "protocol.c", "auth.c"):
+        for name in ("core.c", "protocol.c", "auth.c", "talk.c", "sip.c"):
             original = (ROOT / "core" / name).read_text()
             copy = (COMPONENT / name).read_text().split("\n", 1)[1]
             self.assertEqual(original, copy)
 
     def test_sse_stack_and_transport_cleanup_regression(self):
         web = (COMPONENT / "web.c").read_text()
-        self.assertIn("#define TG_SSE_STACK_BYTES 8192", web)
+        self.assertIn("#define TG_SSE_STACK_BYTES 6144", web)
         self.assertNotIn('xTaskCreate(sse_task, "sse", 3072', web)
         self.assertIn("MSG_PEEK | MSG_DONTWAIT", web)
         self.assertIn("shutdown(fd, SHUT_RDWR)", web)
@@ -123,8 +123,8 @@ class SourceContract(unittest.TestCase):
     def test_remote_package_and_component_are_version_pinned(self):
         example = (ROOT / "tygbot.example.yaml").read_text()
         package = PACKAGE.read_text()
-        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.0.0", example)
-        self.assertIn("repository_ref: v1.0.0", package)
+        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.1.0", example)
+        self.assertIn("repository_ref: v1.1.0", package)
         self.assertIn("ref: ${repository_ref}", package)
         self.assertNotIn("type: local", package)
         self.assertIn("refresh: never", package)
@@ -137,6 +137,7 @@ class SourceContract(unittest.TestCase):
             self.assertNotIn(custom, package)
         # Scanning runs only while Wi-Fi is connected, leaving the radio to the hotspot.
         self.assertIn("continuous: false", package)
+        self.assertIn("post_connect_roaming: false", package)
         self.assertIn("on_connect:\n    - esp32_ble_tracker.start_scan:", package)
         self.assertIn("on_disconnect:\n    - esp32_ble_tracker.stop_scan:", package)
         self.assertEqual(package.count("next_url: http://{{ip_address}}/"), 2)
@@ -166,9 +167,45 @@ class SourceContract(unittest.TestCase):
         self.assertIn(f"repository_ref: v{version}", package)
         self.assertIn(f"tygbot.yaml@v{version}", (ROOT / "tygbot.example.yaml").read_text())
         self.assertIn(f'default="{version}"', (ROOT / "verify_transport.py").read_text())
-        # The setup page shows the version substituted at sync time.
+        # The setup page carries a placeholder for the version.
         self.assertIn("v__TG_VERSION__", (ROOT / "core/setup.html").read_text())
-        self.assertNotIn("__TG_VERSION__", (COMPONENT / "assets.c").read_text())
+        # Filled in when served, together with the build commit.
+        self.assertIn('static const char mark[] = "__TG_VERSION__";', (COMPONENT / "web.c").read_text())
+
+    def test_sip_call_isolated_from_door_path(self):
+        # A door-station call (SIP) failure must never block opening the door:
+        # sip.c must not touch the door action lock or the door/open routines.
+        sip = (ROOT / "core/sip.c").read_text()
+        for forbidden in ("tg_action_lock", "tg_open", "tg_refresh", "tg_submit_open"):
+            self.assertNotIn(forbidden, sip)
+        # SIP runs on its own task and UDP socket.
+        self.assertIn('xTaskCreate(sip_task, "tyg-sip"', sip)
+        talk = (ROOT / "core/talk.c").read_text()
+        for forbidden in ("ws_close", "tg_refresh", "discover(", "query_households", "tg_action_lock, portMAX_DELAY"):
+            self.assertNotIn(forbidden, talk)
+        # Only a non-blocking take around a new TLS handshake; a busy door defers the fetch.
+        self.assertEqual(talk.count("xSemaphoreTake(tg_action_lock, 0)"), 1)
+        self.assertEqual(talk.count("xSemaphoreGive(tg_action_lock)"), 1)
+        web = (ROOT / "core/web.c").read_text()
+        self.assertNotIn("tg_talk_fetch(", web)
+        self.assertIn("tg_talk_fetch(&cfg, detail, &retry_s)", sip)
+        # The registration loop and the TLS fetch never share the SIP task stack.
+        self.assertIn("static NOINLINE sip_end run_session(", sip)
+        self.assertIn("static NOINLINE void obtain_config(", sip)
+        self.assertIn("calloc(1, sizeof(*w))", talk)
+        # A normal boot registers from the NVS cache instead of fetching over TLS.
+        self.assertIn('nvs_set_blob(store, "sip"', (COMPONENT / "tygbot.cpp").read_text())
+        self.assertIn("static uint32_t request_generation = 1;", sip)
+        self.assertIn("set_state(false, detail)", sip)
+        self.assertIn("SIP 注册超时", sip)
+        self.assertIn("requested == request_generation", sip)
+        self.assertNotIn('esp_http_client_get_header(h, "Set-Cookie"', talk)
+        self.assertIn("HTTP_EVENT_ON_HEADER", talk)
+        # The call account lives under its own NVS key, leaving the 936-byte door blob intact.
+        adapter = (COMPONENT / "tygbot.cpp").read_text()
+        self.assertNotIn("sip_started_ = true;\n  tg_talk_request();", adapter)
+        self.assertIn('nvs_set_blob(store, "talk"', adapter)
+        self.assertIn("static_assert(sizeof(tg_config) == 936", adapter)
 
     def test_test_use_notice_is_visible(self):
         notice = "仅供授权测试使用，非官方项目。"

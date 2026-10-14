@@ -8,6 +8,10 @@
 #define TG_MAX_BODY 1024
 
 extern tg_config tg_cfg;
+extern tg_talk_auth tg_talk;
+/* Commit the firmware was built from (tygbot.cpp); empty when unknown. */
+extern const char tg_build_commit[];
+bool tg_talk_save(void);
 extern SemaphoreHandle_t tg_state_lock;
 extern SemaphoreHandle_t tg_action_lock;
 extern bool tg_http_auth_required;
@@ -19,9 +23,31 @@ void tg_login_note(int state, bool relogin);
 void tg_event(const char *kind, const cJSON *value);
 cJSON *tg_snapshot(void);
 void tg_set_busy(bool busy);
+/* Door state for the HA entities, read under one lock without building JSON. */
+typedef struct {
+    bool busy, has_door, has_warm;
+    int login; /* -1 unknown, 0 logged out, 1 logged in */
+    char door_detail[TG_DETAIL], door_at[24], warm_detail[TG_DETAIL];
+} tg_door_status;
+void tg_door_status_get(tg_door_status *out);
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source);
 
 void tg_protocol_init(void);
+/* 服务发现只发布地址副本；对讲任务独占认证和 HTTP。地址变化只提前重试，不作废已有配置。 */
+void tg_talk_endpoint(const char *url, int port);
+/* 拉取 SIP 配置；失败时 *retry_s 给出建议的重试间隔（秒）。 */
+bool tg_talk_fetch(tg_sip_config *out, char *detail, int *retry_s);
+/* 重新登录或手动刷新：作废缓存并在 SIP 任务重新拉取，不占用门禁 worker。 */
+void tg_talk_request(void);
+/* SIP 配置的 NVS 缓存（tygbot.cpp 实现）。 */
+bool tg_sip_cache_load(tg_sip_cache *out);
+bool tg_sip_cache_save(const tg_sip_cache *cache);
+void tg_sip_cache_clear(void);
+/* SIP client (sip.c): registration and incoming-call notification, on its own task/socket. */
+void tg_sip_init(void);
+void tg_sip_state(tg_call_state *out);
+/* 服务发现等前置条件变化时提前重试拉取，不作废配置。 */
+void tg_sip_kick(void);
 bool tg_refresh(bool force, char *detail);
 bool tg_open(bool dry, char *detail, double *reply_wait);
 bool tg_login_send(const char *phone, char **captcha, char *detail);

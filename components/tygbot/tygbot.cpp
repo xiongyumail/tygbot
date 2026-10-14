@@ -23,6 +23,26 @@ static nvs_handle_t store;
 bool tg_storage_save(void) {
   return nvs_set_blob(store, "config", &tg_cfg, sizeof(tg_cfg)) == ESP_OK && nvs_commit(store) == ESP_OK;
 }
+// Door-station call account, kept in a separate NVS key so the door config blob layout is unchanged.
+tg_talk_auth tg_talk;
+#ifndef TG_BUILD_COMMIT
+#define TG_BUILD_COMMIT ""
+#endif
+const char tg_build_commit[] = TG_BUILD_COMMIT;
+bool tg_talk_save(void) {
+  return nvs_set_blob(store, "talk", &tg_talk, sizeof(tg_talk)) == ESP_OK && nvs_commit(store) == ESP_OK;
+}
+// SIP config fetched from the talkback platform, so a reboot registers without a TLS request.
+bool tg_sip_cache_load(tg_sip_cache *out) {
+  size_t length = sizeof(*out);
+  return nvs_get_blob(store, "sip", out, &length) == ESP_OK && length == sizeof(*out);
+}
+bool tg_sip_cache_save(const tg_sip_cache *cache) {
+  return nvs_set_blob(store, "sip", cache, sizeof(*cache)) == ESP_OK && nvs_commit(store) == ESP_OK;
+}
+void tg_sip_cache_clear(void) {
+  if (nvs_erase_key(store, "sip") == ESP_OK) nvs_commit(store);
+}
 bool tg_time_ready(void) { return time(nullptr) > 1700000000; }
 void tg_timestamp(char *out, size_t cap, bool compact) {
   // Server requires Shanghai time, independent of HA / ESPHome's global TZ.
@@ -73,6 +93,10 @@ void TYGBot::setup() {
   if ((err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) || (err == ESP_OK && length != sizeof(tg_cfg))) {
     status_ = "存储格式不匹配，保留数据"; mark_failed(); return;
   }
+  // Door-station call account is optional; a missing or stale blob just leaves the call feature idle.
+  size_t talk_length = sizeof(tg_talk);
+  if (nvs_get_blob(store, "talk", &tg_talk, &talk_length) != ESP_OK || talk_length != sizeof(tg_talk))
+    memset(&tg_talk, 0, sizeof(tg_talk));
   // ESPHome alone owns Wi-Fi; do not copy secrets or initialise its stack.
   if (!tg_copy(tg_cfg.host, sizeof(tg_cfg.host), host_.c_str()) ||
       !tg_copy(tg_cfg.organization, sizeof(tg_cfg.organization), organization_.c_str()) ||
@@ -112,34 +136,40 @@ void TYGBot::loop() {
   }
   if (!tg_storage_save()) { status_ = "会话存储失败，OTA仍可用"; mark_failed(); return; }
   tg_protocol_init();
+  tg_sip_init();
   if (!tg_web_start()) { status_ = "服务内存不足，OTA仍可用"; mark_failed(); return; }
   // Hold a reference so the listener stays up after the captive portal ends.
   web_server_base::global_web_server_base->init();
   ready_ = true;
+  // The SIP task started above registers from the cached config or fetches it; failure never affects the door.
+  sip_started_ = true;
   ESP_LOGI(TAG, "Web service ready on port %d", TG_HTTP_PORT);
 }
 void TYGBot::update() {
   if (!ready_) return;
-  cJSON *snapshot = tg_snapshot();
-  if (!snapshot) return;
-  busy_ = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(snapshot, "busy"));
-  cJSON *login = cJSON_GetObjectItemCaseSensitive(snapshot, "login");
-  logged_in_ = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(login, "ok"));
-  cJSON *last = cJSON_GetObjectItemCaseSensitive(snapshot, "last_door");
-  if (cJSON_IsObject(last)) {
-    last_result_ = tg_string(last, "detail");
-    last_result_ += " · "; last_result_ += tg_string(last, "at");
+  tg_door_status door;
+  tg_door_status_get(&door);
+  busy_ = door.busy;
+  logged_in_ = door.login == 1;
+  if (door.has_door) {
+    last_result_ = door.door_detail;
+    last_result_ += " · "; last_result_ += door.door_at;
   }
-  cJSON *warm = cJSON_GetObjectItemCaseSensitive(snapshot, "last_warm_up");
   status_ = !tg_time_ready() ? "等待网络校时" : busy_ ? "正在请求开门" :
-      cJSON_IsObject(warm) ? tg_string(warm, "detail") : logged_in_ ? "已登录" : "请在设备网页短信登录";
-  cJSON_Delete(snapshot);
+      door.has_warm ? door.warm_detail : logged_in_ ? "已登录" : "请在设备网页短信登录";
+  if (sip_started_) {
+    tg_call_state call;
+    tg_sip_state(&call);
+    call_registered_ = call.registered; call_ringing_ = call.ringing;
+    caller_ = call.caller; call_status_ = call.detail;
+  }
 }
 bool TYGBot::open(bool dry) {
   if (!ready_ || !network::is_connected() || !tg_time_ready()) { status_ = "设备尚未就绪，未发送开门请求"; return false; }
   if (!tg_submit_open(dry)) { status_ = "服务忙，未发送请求"; return false; }
   return true;
 }
+void TYGBot::refresh_call() { if (sip_started_) tg_talk_request(); }
 void TYGBot::dump_config() {
   ESP_LOGCONFIG(TAG, "TYGBot: local web/API :%d, native ESPHome API and OTA", TG_HTTP_PORT);
 }
