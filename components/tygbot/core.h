@@ -19,10 +19,12 @@ typedef struct {
     char code[128], number[16], name[96], id[64], group[96];
 } tg_door;
 typedef struct {
-    char token[256], mobile[12], household[128], organization[128];
+    char token[256], mobile[12], household[128], organization[128], area[96];
 } tg_room;
 typedef struct {
-    char ssid[33], wifi_password[65], host[64];
+    /* Wi-Fi is owned by ESPHome. Keep these bytes reserved so persisted sessions stay readable. */
+    unsigned char reserved[98];
+    char host[64];
     char organization[128], household[128], door_code[128], door_number[16];
     unsigned char salt[16], password_hash[32], cookie_key[32];
     bool password_set;
@@ -45,14 +47,22 @@ typedef struct {
 /* Door-station call status shown in HA and the web page. */
 typedef struct {
     bool registered, ringing;
-    char caller[64], detail[TG_DETAIL];
+    char caller[64], detail[TG_DETAIL], ended_by[16];
+    uint32_t generation;
     uint32_t stack_min_free;
 } tg_call_state;
+/* Selected authorization context. Identifiers stay internal; labels are used by the UI and HA. */
+typedef struct {
+    bool door_selected, caller_unique;
+    char household_name[96], door_name[192], door_code[128];
+} tg_target_state;
 
 const char *tg_string(const cJSON *value, const char *key);
 cJSON *tg_parse_json(const char *text);
 bool tg_is_code(const cJSON *value, const char *key, const char *code);
 bool tg_copy(char *dest, size_t capacity, const char *value);
+/* Convert a raw caller identifier to the selected door label, or "未知门禁". */
+bool tg_call_source(const tg_target_state *target, const char *caller, char *source, size_t capacity);
 bool tg_on_captive_interface(bool active, const char *local_ip, const char *ap_ip);
 bool tg_url_allowed(const char *url, bool image, bool ws);
 bool tg_phone_valid(const char *value);
@@ -63,6 +73,8 @@ bool tg_open_ok(const cJSON *value);
 bool tg_select_room(const cJSON *value, const tg_config *config, tg_room *room, char *detail);
 bool tg_parse_doors(const cJSON *value, tg_door *doors, size_t *count, char *detail);
 bool tg_select_door(const tg_config *config, const tg_door *doors, size_t count, size_t *index);
+/* Caller identifiers are safe for automation only for one household and one matching door code. */
+bool tg_caller_target_unique(size_t household_count, const tg_door *doors, size_t count, size_t selected);
 
 void tg_md5_hex(const char *text, char out[33]);
 /* Login replies carry the account password Base64-encoded; only its MD5 is kept. */

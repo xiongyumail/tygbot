@@ -14,6 +14,14 @@ int main(void) {
     CHECK(!tg_on_captive_interface(true, "192.0.2.10", "192.168.4.1"));
     CHECK(!tg_on_captive_interface(true, "192.168.4.1", ""));
     CHECK(!tg_on_captive_interface(true, NULL, "192.168.4.1"));
+    tg_target_state target = {0}; char source[192];
+    CHECK(!tg_call_source(&target, "", source, sizeof(source))); CHECK(!*source);
+    CHECK(!tg_call_source(&target, "door-a", source, sizeof(source))); CHECK(!strcmp(source, "未知门禁"));
+    target.door_selected = true; strcpy(target.door_code, "door-a"); strcpy(target.door_name, "一号门禁");
+    CHECK(!tg_call_source(&target, "door-a", source, sizeof(source))); CHECK(!strcmp(source, "未知门禁"));
+    target.caller_unique = true;
+    CHECK(tg_call_source(&target, "door-a", source, sizeof(source))); CHECK(!strcmp(source, "一号门禁"));
+    CHECK(!tg_call_source(&target, "door-b", source, sizeof(source))); CHECK(!strcmp(source, "未知门禁"));
     CHECK(tg_parse_json("{\"code\":0}garbage") == NULL);
     char deep[100]; memset(deep,'[',40); memset(deep+40,']',40); deep[80]=0;
     CHECK(tg_parse_json(deep) == NULL);
@@ -41,6 +49,10 @@ int main(void) {
     v=json(plain); CHECK(tg_parse_doors(v,doors,&count,detail)); CHECK(count==2); CHECK(!tg_select_door(&cfg,doors,count,&index));
     strcpy(cfg.door_number,"0"); CHECK(tg_select_door(&cfg,doors,count,&index)); CHECK(index==0);
     strcpy(cfg.door_number,"1"); CHECK(tg_select_door(&cfg,doors,count,&index)); CHECK(index==1);
+    strcpy(doors[0].code, "other-door");
+    CHECK(tg_caller_target_unique(1, doors, count, index));
+    CHECK(!tg_caller_target_unique(2, doors, count, index));
+    strcpy(doors[0].code, doors[1].code); CHECK(!tg_caller_target_unique(1, doors, count, index));
     strcpy(cfg.door_code,"wrong"); CHECK(!tg_select_door(&cfg,doors,count,&index)); cJSON_Delete(v);
     v=json("{\"result\":0,\"data\":{\"DOOR_CONTROL\":{\"NO_GROUP_LIST\":[],\"DOOR_GROUP_LIST\":[{\"Name\":\"group\",\"LockGroup\":[{\"Show\":1,\"Lock\":{\"DeviceCode\":\"group-door\",\"Show\":1,\"Number\":0}}]}]}}}");
     CHECK(tg_parse_doors(v,doors,&count,detail)); CHECK(count==1); CHECK(!strcmp(doors[0].code,"group-door")); cJSON_Delete(v);

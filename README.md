@@ -7,7 +7,7 @@ ESP32-C3 门禁测试客户端。
 ## 功能
 
 - 在手机网页上开门
-- 门口机呼叫时提醒（不接听）
+- 门禁来电时提醒，并可选择联动开门
 - 接入 Home Assistant
 - 兼作 Home Assistant 蓝牙网关
 
@@ -46,14 +46,15 @@ esptool.py --chip esp32c3 write_flash 0x0 tygbot-esp32c3-<版本>.factory.bin
 
 在设备网页点击开门按钮。请求只发送一次，不自动重试；显示“成功”表示服务器已确认，不代表检测到门已打开。
 
-### 来电提醒
+### 门禁来电
 
-门口机呼叫本户时，设备网页顶部显示提示，Home Assistant 中“门口机呼叫”变为检测到，“呼叫来源”显示主叫号码，事件推送接口同时发出 `call` 事件。设备不接听，也不传输语音和视频。
+收到门禁来电时，设备会匹配当前门禁，并在网页和 Home Assistant 中显示门禁名称。设备不接听，也不传输音视频。
 
-- 对讲账号在短信登录时一并取得。从不含此功能的版本升级后，需要重新短信登录一次。
-- 对讲配置保存在设备中，重启后直接注册。换账号时自动重新获取，也可按“重新获取对讲配置”手动刷新。
-- 设备通过 UDP 连接对讲平台（默认端口 6000），网络需允许访问。
-- 与官方 App 共用账号时，App 的来电可能受影响。
+“来电联动开门”默认关闭，仅在来电能唯一匹配当前门禁时可开启。开启后，每通来电只尝试开门一次；服务器确认成功后，设备结束来电。匹配失败、来电已结束或开门未成功时，不重试，也不结束来电。更换账号或当前门禁会自动关闭此功能。
+
+- 从不支持门禁来电的版本升级后，需要重新短信登录一次。
+- 来电配置保存在设备中，也可手动刷新。
+- 来电服务使用 UDP（默认端口 6000）。与其他客户端共用账号时，其他客户端的来电可能受到影响。
 
 ## 接入 Home Assistant
 
@@ -63,27 +64,27 @@ esptool.py --chip esp32c3 write_flash 0x0 tygbot-esp32c3-<版本>.factory.bin
 
 | 类别 | 实体 |
 | --- | --- |
-| 开门 | 开门、门禁检查（不开门）、最近开门结果、桃园谷已登录、状态 |
-| 来电 | 门口机呼叫、呼叫来源、对讲状态、重新获取对讲配置 |
-| 诊断 | 服务就绪、开门处理中、对讲已注册、内存、运行时间、Wi-Fi 信号 |
+| 开门 | 开门、门禁检查（不开门）、最近开门结果、登录状态、服务状态、当前住房、当前门禁 |
+| 来电 | 门禁来电、来电来源、来电标识（诊断）、来电服务状态、来电联动开门、重新获取来电配置 |
+| 诊断 | 服务就绪、开门处理中、来电服务已连接、内存、运行时间、Wi-Fi 信号 |
 | 其他 | 蓝牙网关（在蓝牙集成中出现）、设备页的“访问”入口 |
 
-实体名称为“英文 中文”格式，如 `Door Call 门口机呼叫`。需要纯中文时在实体设置中修改显示名称；不要修改固件中的名称，否则 Home Assistant 会当作新实体。设备信息中的固件版本带构建提交号，如 `1.1.0+a1b2c`。
+实体名称为“英文 中文”格式，如 `Door Call 门禁来电`。需要纯中文时在实体设置中修改显示名称；不要修改固件中的名称，否则 Home Assistant 会当作新实体。设备信息中的固件版本带构建提交号，如 `1.2.0+a1b2c`。
 
 呼叫通知可用自动化实现（实体 ID 以 Home Assistant 中显示的为准）：
 
 ```yaml
 automation:
-  - alias: 门口机呼叫通知
+  - alias: 门禁来电通知
     triggers:
       - trigger: state
-        entity_id: binary_sensor.tygbot_door_call_men_kou_ji_hu_jiao
+        entity_id: binary_sensor.tygbot_door_call_men_jin_lai_dian
         from: "off"
         to: "on"
     actions:
       - action: notify.notify
         data:
-          message: "门口机呼叫：{{ states('sensor.tygbot_caller_hu_jiao_lai_yuan') }}"
+          message: "门禁来电：{{ states('sensor.tygbot_caller_lai_dian_lai_yuan') }}"
 ```
 
 ## 升级
@@ -117,7 +118,7 @@ automation:
 
 **USB 配网没反应？** 开发板可能经转串口芯片连接，改用热点或蓝牙。
 
-**提示“多个授权住房”或“门禁不唯一”？** 在配置中指定，见“指定住房和门禁”。
+**提示“多个授权住房”或“门禁不唯一”？** 在设备网页选择当前住房和门禁，见“多个住房或门禁”。
 
 **对讲状态不是“对讲已注册”？** 显示“尚无对讲账号”时重新短信登录；显示注册超时时检查网络是否允许访问对讲平台的 UDP 端口；其他情况可按“重新获取对讲配置”。
 
@@ -133,18 +134,9 @@ automation:
 
 设备名可在 substitutions 中修改，网页地址随之变为 `http://<设备名>.local/`。含个人密码的固件不要公开分享。
 
-### 指定住房和门禁
+### 多个住房或门禁
 
-打开 `http://tygbot.local/households` 和 `http://tygbot.local/doors` 查看可用值，填入 `tygbot.yaml` 后用 ESPHome Device Builder 安装：
-
-```yaml
-tygbot:
-  organization: "<organization>"
-  household: "<household>"
-  door_number: "<number>"
-```
-
-只填区分所需的项：同一门禁有多个编号时填 `door_number`，有多个门禁时填 `door_code`。
+只有一个有效住房和门禁时，设备会自动选择。存在多个目标时，在设备网页的“当前门禁”旁点击“选择”，按名称选择住房和门禁；设备会复用最近一次连接取得的授权列表，切换到其他住房时按需更新，并在保存前重新验证授权。选择结果重启后继续使用，不需要写入 ESPHome 配置。
 
 ### Release 文件
 
@@ -162,12 +154,15 @@ tygbot:
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/`、`/icon.png` | 网页与图标 |
-| GET | `/health`、`/status`、`/diagnostics` | 状态与诊断，含对讲状态和构建提交号 |
+| GET | `/health` | 最小存活状态、版本和构建提交号 |
+| GET | `/status`、`/diagnostics` | 设备状态与诊断，含对讲状态和构建提交号 |
 | GET | `/events` | 事件推送，见下节 |
-| GET | `/households`、`/doors` | 授权住房与门禁列表 |
+| GET | `/households`、`/doors`、`/target` | 授权列表与当前选择 |
 | POST | `/login/send`、`/login/captcha`、`/login/sms` | 登录 |
 | POST | `/door?dry=1` | 门禁检查，不开门 |
 | POST | `/door?from=web` | 开门 |
+| POST | `/settings` | 保存“来电联动开门”开关 |
+| POST | `/target` | 验证并保存当前住房和门禁 |
 | POST | `/update` | 上传 `ota.bin`（multipart 表单）；只接受本设备网页的同源请求，配网热点上不限 |
 
 ### 事件推送
@@ -179,11 +174,13 @@ tygbot:
 | `door_start` | 开始处理开门请求 | `source`、`ts` |
 | `door` | 开门结束 | `ok`、`detail`、`seconds`、`at`、`source` |
 | `login` | 登录状态变化 | `ok`、`at` |
-| `call` | 门口机开始或结束呼叫 | `ringing`、`caller`、`ts` |
+| `call` | 门禁来电开始或结束 | `ringing`、`source`、`matched`、`ended_by`、`ts` |
+| `target` | 当前住房或门禁变化 | `selected`、`automatic_supported`、`household`、`door` |
+| `settings` | 来电联动设置变化 | `call_linked_open` |
 
 ```
 event: call
-data: {"ringing":true,"caller":"9001","ts":1234}
+data: {"ringing":true,"source":"一号门","matched":true,"ts":1234}
 ```
 
 - 无事件时每 2 秒发送一行 `: ping`。
@@ -205,7 +202,7 @@ with urllib.request.urlopen("http://tygbot.local/events") as stream:
         elif line.startswith("data:") and event == "call":
             call = json.loads(line[5:])
             if call["ringing"]:
-                print("门口机呼叫", call["caller"])
+                print("门禁来电", call["source"], "已匹配" if call["matched"] else "未匹配")
 ```
 
 ### 开发

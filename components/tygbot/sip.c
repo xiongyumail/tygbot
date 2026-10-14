@@ -39,24 +39,55 @@ static bool task_ready;
 static SemaphoreHandle_t config_lock;
 /* Reported to HA; guarded by tg_state_lock (shared with web.c). */
 static bool registered, in_call;
-static char caller[64], sip_state[TG_DETAIL] = "未启动";
+static char caller[64], sip_state[TG_DETAIL] = "未启动", last_end[16];
+static uint32_t call_sequence, active_generation, decline_generation;
 static uint32_t stack_min_free = UINT32_MAX;
+/* Prepared from the ringing INVITE, so a later decline allocates neither heap nor SIP stack. */
+static char final_response[SIP_TX];
+static size_t final_response_length;
 
 static void set_state(bool reg, const char *text) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
     registered = reg; tg_copy(sip_state, sizeof(sip_state), text);
     xSemaphoreGive(tg_state_lock);
 }
-static void note_call(bool ringing, const char *who) {
-    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
-    bool changed = ringing != in_call || (ringing && strcmp(caller, who ? who : ""));
-    in_call = ringing; tg_copy(caller, sizeof(caller), ringing && who ? who : "");
-    xSemaphoreGive(tg_state_lock);
-    if (!changed) return;
+static void call_event(bool ringing, const char *who, const char *ended_by) {
+    tg_target_state target; tg_target_state_get(&target);
+    char source[sizeof(target.door_name)];
+    bool matched = tg_call_source(&target, ringing ? who : NULL, source, sizeof(source));
     cJSON *v = cJSON_CreateObject();
-    cJSON_AddBoolToObject(v, "ringing", ringing); cJSON_AddStringToObject(v, "caller", ringing && who ? who : "");
+    cJSON_AddBoolToObject(v, "ringing", ringing);
+    cJSON_AddStringToObject(v, "source", source);
+    cJSON_AddBoolToObject(v, "matched", matched);
+    if (!ringing && ended_by && *ended_by) cJSON_AddStringToObject(v, "ended_by", ended_by);
     cJSON_AddNumberToObject(v, "ts", esp_timer_get_time() / 1000000);
     tg_event("call", v); cJSON_Delete(v);
+}
+static uint32_t begin_call(const char *who) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    if (++call_sequence == 0) call_sequence = 1;
+    active_generation = call_sequence; decline_generation = 0; in_call = true; last_end[0] = 0;
+    tg_copy(caller, sizeof(caller), who ? who : "");
+    uint32_t generation = active_generation;
+    xSemaphoreGive(tg_state_lock);
+    call_event(true, who, NULL);
+    tg_submit_call_open(generation, who);
+    return generation;
+}
+static void end_call(uint32_t generation, const char *ended_by) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool changed = in_call && (!generation || generation == active_generation);
+    if (changed) {
+        in_call = false; active_generation = 0; decline_generation = 0; caller[0] = 0;
+        tg_copy(last_end, sizeof(last_end), ended_by ? ended_by : "");
+    }
+    xSemaphoreGive(tg_state_lock);
+    if (changed) call_event(false, NULL, ended_by);
+}
+static bool decline_requested(uint32_t generation) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool requested = in_call && active_generation == generation && decline_generation == generation;
+    xSemaphoreGive(tg_state_lock); return requested;
 }
 static void note_stack(void) {
     uint32_t free_bytes = uxTaskGetStackHighWaterMark(NULL);
@@ -68,8 +99,21 @@ void tg_sip_state(tg_call_state *out) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
     out->registered = registered; out->ringing = in_call;
     tg_copy(out->caller, sizeof(out->caller), caller); tg_copy(out->detail, sizeof(out->detail), sip_state);
-    out->stack_min_free = stack_min_free;
+    tg_copy(out->ended_by, sizeof(out->ended_by), last_end);
+    out->generation = in_call ? active_generation : 0; out->stack_min_free = stack_min_free;
     xSemaphoreGive(tg_state_lock);
+}
+bool tg_sip_call_matches(uint32_t generation, const char *who) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool matches = generation && who && *who && in_call && active_generation == generation && !strcmp(caller, who);
+    xSemaphoreGive(tg_state_lock); return matches;
+}
+bool tg_sip_decline(uint32_t generation) {
+    if (!generation) return false;
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool accepted = in_call && active_generation == generation;
+    if (accepted) decline_generation = generation;
+    xSemaphoreGive(tg_state_lock); return accepted;
 }
 
 void tg_talk_request(void) {
@@ -130,9 +174,12 @@ typedef struct {
     char local_ip[INET_ADDRSTRLEN];
     int local_port;
     char call_id[64], from_tag[17];
-    /* Ringing INVITE: its Call-ID and our To tag, shared by 180 and 487. */
+    /* One unanswered INVITE transaction; final replies remain cached until ACK. */
     char invite_call[128], to_tag[17];
-    unsigned cseq;
+    unsigned cseq, invite_cseq;
+    uint32_t invite_generation;
+    int final_status;
+    int64_t final_until;
 } sip_ctx;
 typedef enum { SIP_RESTART, SIP_REJECTED } sip_end;
 
@@ -183,59 +230,112 @@ static NOINLINE bool send_register(sip_ctx *c, const tg_sip_config *cfg, const c
     if (m < 0 || (size_t)m >= sizeof(msg) - n) return false;
     return send(c->fd, msg, n + m, 0) >= 0;
 }
-/* Reply to an INVITE/CANCEL/BYE, copying its dialog headers straight into the message. */
-static NOINLINE void respond(sip_ctx *c, const char *request, int status, const char *reason, bool add_to_tag, const char *cseq_override) {
-    char msg[SIP_TX];
-    size_t n = (size_t)snprintf(msg, sizeof(msg), "SIP/2.0 %d %s\r\n", status, reason);
-    if (!tg_sip_headers(request, "Via", msg + n, sizeof(msg) - n)) return;
+/* Build a response by copying the server transaction headers from the request. */
+static NOINLINE bool build_response(sip_ctx *c, const char *request, int status, const char *reason, bool add_to_tag,
+                                    const char *cseq_override, char *msg, size_t cap, size_t *length) {
+    int first = snprintf(msg, cap, "SIP/2.0 %d %s\r\n", status, reason);
+    if (first < 0 || (size_t)first >= cap) return false;
+    size_t n = (size_t)first;
+    if (!tg_sip_headers(request, "Via", msg + n, cap - n)) return false;
     n += strlen(msg + n);
-    if (!tg_sip_headers(request, "From", msg + n, sizeof(msg) - n)) return;
+    if (!tg_sip_headers(request, "From", msg + n, cap - n)) return false;
     n += strlen(msg + n);
-    if (!tg_sip_headers(request, "To", msg + n, sizeof(msg) - n)) return;
+    if (!tg_sip_headers(request, "To", msg + n, cap - n)) return false;
     size_t to_len = strlen(msg + n);
     /* A To tag already present (an in-dialog request) is kept. */
     if (add_to_tag && !strstr(msg + n, ";tag=") && *c->to_tag) {
         n += to_len - 2;
-        int m = snprintf(msg + n, sizeof(msg) - n, ";tag=%s\r\n", c->to_tag);
-        if (m < 0 || (size_t)m >= sizeof(msg) - n) return;
+        int m = snprintf(msg + n, cap - n, ";tag=%s\r\n", c->to_tag);
+        if (m < 0 || (size_t)m >= cap - n) return false;
         n += (size_t)m;
     } else n += to_len;
-    if (!tg_sip_headers(request, "Call-ID", msg + n, sizeof(msg) - n)) return;
+    if (!tg_sip_headers(request, "Call-ID", msg + n, cap - n)) return false;
     n += strlen(msg + n);
-    int m = cseq_override ? snprintf(msg + n, sizeof(msg) - n, "CSeq: %s\r\n", cseq_override) : 0;
-    if (m < 0 || (size_t)m >= sizeof(msg) - n) return;
-    if (!cseq_override && !tg_sip_headers(request, "CSeq", msg + n, sizeof(msg) - n)) return;
+    int m = cseq_override ? snprintf(msg + n, cap - n, "CSeq: %s\r\n", cseq_override) : 0;
+    if (m < 0 || (size_t)m >= cap - n) return false;
+    if (!cseq_override && !tg_sip_headers(request, "CSeq", msg + n, cap - n)) return false;
     n += cseq_override ? (size_t)m : strlen(msg + n);
-    m = snprintf(msg + n, sizeof(msg) - n, "Contact: <sip:tygbot@%s:%d>\r\nUser-Agent: TYGBot\r\nContent-Length: 0\r\n\r\n",
+    m = snprintf(msg + n, cap - n, "Contact: <sip:tygbot@%s:%d>\r\nUser-Agent: TYGBot\r\nContent-Length: 0\r\n\r\n",
                  c->local_ip, c->local_port);
-    if (m < 0 || (size_t)m >= sizeof(msg) - n) return;
-    send(c->fd, msg, n + (size_t)m, 0);
+    if (m < 0 || (size_t)m >= cap - n) return false;
+    *length = n + (size_t)m; return true;
 }
-static NOINLINE void handle_request(sip_ctx *c, const char *buf, const char *method) {
-    char call[128] = "";
-    tg_sip_header(buf, "Call-ID", call, sizeof(call));
-    bool ringing_call = *c->invite_call && !strcmp(call, c->invite_call);
+static NOINLINE bool respond(sip_ctx *c, const char *request, int status, const char *reason, bool add_to_tag, const char *cseq_override) {
+    char msg[SIP_TX]; size_t length;
+    return build_response(c, request, status, reason, add_to_tag, cseq_override, msg, sizeof(msg), &length)
+        && send(c->fd, msg, length, 0) == (ssize_t)length;
+}
+static void clear_invite(sip_ctx *c) {
+    c->invite_call[0] = 0; c->to_tag[0] = 0; c->invite_cseq = 0; c->invite_generation = 0;
+    c->final_status = 0; c->final_until = 0; final_response_length = 0;
+}
+static bool request_key(const char *buf, char *call, size_t capacity, unsigned *number) {
+    char cseq[64];
+    return tg_sip_header(buf, "Call-ID", call, capacity) && *call
+        && tg_sip_header(buf, "CSeq", cseq, sizeof(cseq)) && sscanf(cseq, "%u", number) == 1;
+}
+static bool same_invite(const sip_ctx *c, const char *call, unsigned number) {
+    return *c->invite_call && number == c->invite_cseq && !strcmp(call, c->invite_call);
+}
+static bool same_call(const sip_ctx *c, const char *call) {
+    return *c->invite_call && *call && !strcmp(call, c->invite_call);
+}
+static bool send_prepared(sip_ctx *c) {
+    return final_response_length && send(c->fd, final_response, final_response_length, 0) == (ssize_t)final_response_length;
+}
+static void apply_decline(sip_ctx *c, int64_t now) {
+    if (!*c->invite_call || c->final_status || !decline_requested(c->invite_generation)) return;
+    if (send_prepared(c)) {
+        c->final_status = 603; c->final_until = now + 32000000LL;
+        end_call(c->invite_generation, "declined");
+    }
+}
+static NOINLINE void handle_request(sip_ctx *c, const char *buf, const char *method, int64_t now) {
+    char call[128] = ""; unsigned number = 0;
+    bool has_key = request_key(buf, call, sizeof(call), &number);
+    bool same = has_key && same_invite(c, call, number);
     if (!strcmp(method, "INVITE")) {
+        if (!has_key) { respond(c, buf, 400, "Bad Request", false, NULL); return; }
+        if (same) {
+            if (c->final_status) send_prepared(c);
+            else { respond(c, buf, 100, "Trying", false, NULL); respond(c, buf, 180, "Ringing", true, NULL); }
+            return;
+        }
+        /* Only one unanswered door call is supported. Keep its transaction intact. */
+        if (*c->invite_call && !c->final_status) {
+            char old_tag[sizeof(c->to_tag)]; strcpy(old_tag, c->to_tag); hex(c->to_tag, 8);
+            respond(c, buf, 486, "Busy Here", true, NULL); strcpy(c->to_tag, old_tag); return;
+        }
+        if (*c->invite_call) clear_invite(c);  /* A completed call must not block the next new INVITE. */
         char from[256], who[64] = "";
         if (tg_sip_header(buf, "From", from, sizeof(from))) tg_sip_user(from, who, sizeof(who));
-        /* A retransmitted INVITE keeps the same To tag. */
-        if (!ringing_call) { tg_copy(c->invite_call, sizeof(c->invite_call), call); hex(c->to_tag, 8); }
+        tg_copy(c->invite_call, sizeof(c->invite_call), call); c->invite_cseq = number; hex(c->to_tag, 8);
+        char invite_cseq[72]; snprintf(invite_cseq, sizeof(invite_cseq), "%u INVITE", number);
+        if (!build_response(c, buf, 603, "Decline", true, invite_cseq, final_response, sizeof(final_response), &final_response_length)) {
+            respond(c, buf, 500, "Server Internal Error", true, NULL); clear_invite(c); return;
+        }
+        c->invite_generation = begin_call(who);
         respond(c, buf, 100, "Trying", false, NULL);
         respond(c, buf, 180, "Ringing", true, NULL);
-        note_call(true, who);
     } else if (!strcmp(method, "CANCEL")) {
         respond(c, buf, 200, "OK", false, NULL);
-        /* 487 belongs to the INVITE transaction: its CSeq method must be INVITE, not CANCEL. */
-        char cseq[64], invite_cseq[72] = ""; unsigned num;
-        if (tg_sip_header(buf, "CSeq", cseq, sizeof(cseq)) && sscanf(cseq, "%u", &num) == 1) snprintf(invite_cseq, sizeof(invite_cseq), "%u INVITE", num);
-        respond(c, buf, 487, "Request Terminated", true, *invite_cseq ? invite_cseq : NULL);
-        if (ringing_call || !*c->invite_call) { c->invite_call[0] = 0; note_call(false, NULL); }
+        if (same && !c->final_status) {
+            char invite_cseq[72]; snprintf(invite_cseq, sizeof(invite_cseq), "%u INVITE", number);
+            if (build_response(c, buf, 487, "Request Terminated", true, invite_cseq,
+                               final_response, sizeof(final_response), &final_response_length)) {
+                c->final_status = 487; c->final_until = now + 32000000LL; send_prepared(c);
+            }
+            end_call(c->invite_generation, "remote");
+        }
+    } else if (!strcmp(method, "ACK")) {
+        if (same && c->final_status) clear_invite(c);
     } else if (!strcmp(method, "BYE")) {
         respond(c, buf, 200, "OK", false, NULL);
-        if (ringing_call || !*c->invite_call) { c->invite_call[0] = 0; note_call(false, NULL); }
+        /* BYE is a dialog request and normally advances CSeq, so bind it by Call-ID. */
+        if (has_key && same_call(c, call)) { end_call(c->invite_generation, "remote"); clear_invite(c); }
     } else if (!strcmp(method, "OPTIONS")) {
         respond(c, buf, 200, "OK", false, NULL);
-    } else if (strcmp(method, "ACK")) {
+    } else {
         respond(c, buf, 405, "Method Not Allowed", false, NULL);
     }
 }
@@ -243,6 +343,7 @@ static NOINLINE void handle_request(sip_ctx *c, const char *buf, const char *met
 /* One registration session: resolve, bind, register, then service messages until it must restart. */
 static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
     sip_ctx c = {0};
+    final_response_length = 0;
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM}, *res = NULL;
     char port[8]; snprintf(port, sizeof(port), "%d", cfg->port);
     if (getaddrinfo(cfg->proxy, port, &hints, &res) != 0 || !res) { set_state(false, "对讲服务器解析失败"); return SIP_RESTART; }
@@ -256,7 +357,7 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
         inet_ntop(AF_INET, &local.sin_addr, c.local_ip, sizeof(c.local_ip)); c.local_port = ntohs(local.sin_port);
     } else ok = false;
     if (!ok) { close(c.fd); set_state(false, "SIP 连接失败"); return SIP_RESTART; }
-    struct timeval tv = {.tv_sec = 1}; setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct timeval tv = {.tv_usec = 250000}; setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     hex(c.call_id, 12); hex(c.from_tag, 8);
 
     send_register(&c, cfg, NULL, 0);
@@ -301,8 +402,10 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
                     authed = false; char text[48]; snprintf(text, sizeof(text), "SIP 注册被拒绝：%d", status); set_state(false, text);
                     next_register = now + backoff * 1000000LL; backoff = backoff * 2 > SIP_BACKOFF_MAX ? SIP_BACKOFF_MAX : backoff * 2;
                 }
-            } else if (tg_sip_method(buf, method, sizeof(method))) handle_request(&c, buf, method);
+            } else if (tg_sip_method(buf, method, sizeof(method))) handle_request(&c, buf, method, now);
         }
+        apply_decline(&c, now);
+        if (c.final_status && now >= c.final_until) clear_invite(&c);
         if (awaiting_register && now >= register_deadline) {
             awaiting_register = false; authed = false;
             /* Repeated silence usually means a changed address or route: rebuild the socket. */
@@ -350,9 +453,9 @@ static void sip_task(void *unused) {
         tg_sip_config cfg; bool cached = false;
         if (!load_config(&cfg, &cached) || !*cfg.account) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
         set_state(false, "对讲注册中");
-        note_call(false, NULL);
+        end_call(0, "connection");
         sip_end end = run_session(&cfg, cached);
-        note_call(false, NULL); note_stack();
+        end_call(0, "connection"); note_stack();
         memset(&cfg, 0, sizeof(cfg));
         if (end == SIP_REJECTED) tg_talk_request();
         else if (load_config(&cfg, &cached)) { memset(&cfg, 0, sizeof(cfg)); vTaskDelay(pdMS_TO_TICKS(5000)); }

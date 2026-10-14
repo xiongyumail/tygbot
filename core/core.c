@@ -46,6 +46,20 @@ bool tg_copy(char *dest, size_t cap, const char *value) {
     memcpy(dest, value, strlen(value) + 1);
     return true;
 }
+bool tg_call_source(const tg_target_state *target, const char *caller, char *source, size_t cap) {
+    if (!source || !cap) return false;
+    *source = 0;
+    if (!caller || !*caller) return false;
+    bool matched = target && target->door_selected && target->caller_unique && !strcmp(caller, target->door_code);
+    tg_copy(source, cap, matched ? target->door_name : "未知门禁");
+    return matched;
+}
+bool tg_caller_target_unique(size_t household_count, const tg_door *doors, size_t count, size_t selected) {
+    if (household_count != 1 || !doors || selected >= count || !*doors[selected].code) return false;
+    size_t matches = 0;
+    for (size_t i = 0; i < count; i++) if (!strcmp(doors[i].code, doors[selected].code)) matches++;
+    return matches == 1;
+}
 bool tg_phone_valid(const char *v) {
     if (!v || strlen(v) != 11 || v[0] != '1') return false;
     for (int i = 0; i < 11; i++) if (v[i] < '0' || v[i] > '9') return false;
@@ -101,14 +115,15 @@ bool tg_select_room(const cJSON *v, const tg_config *cfg, tg_room *out, char *de
             if (!tg_is_code(room, "valid", "1") || !*token || !*house || !*org || !tg_phone_valid(mobile)) continue;
             found++;
             if (!tg_copy(out->household, sizeof(out->household), house) || !tg_copy(out->organization, sizeof(out->organization), org)
-                || !tg_copy(out->token, sizeof(out->token), token) || !tg_copy(out->mobile, sizeof(out->mobile), mobile)) {
+                || !tg_copy(out->token, sizeof(out->token), token) || !tg_copy(out->mobile, sizeof(out->mobile), mobile)
+                || !tg_copy(out->area, sizeof(out->area), tg_string(area, "areaName"))) {
                 tg_copy(detail, TG_DETAIL, "授权字段过长"); memset(out, 0, sizeof(*out)); return false;
             }
         }
     }
     if (found != 1) {
         memset(out, 0, sizeof(*out));
-        tg_copy(detail, TG_DETAIL, found ? "多个授权住房，请配置 organization/household" : "没有有效授权门禁");
+        tg_copy(detail, TG_DETAIL, found ? "多个授权住房，请在设备网页选择当前住房" : "没有有效授权门禁");
         return false;
     }
     return true;

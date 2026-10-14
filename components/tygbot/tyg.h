@@ -21,6 +21,8 @@ extern SemaphoreHandle_t tg_action_lock;
 extern bool tg_http_auth_required;
 bool tg_password_hash(const char *password, const unsigned char *salt, unsigned char *out);
 bool tg_storage_save(void);
+bool tg_call_linked_open_get(void);
+bool tg_call_linked_open_set(bool enabled);
 bool tg_time_ready(void);
 void tg_timestamp(char *out, size_t capacity, bool compact);
 void tg_login_note(int state, bool relogin);
@@ -35,6 +37,8 @@ typedef struct {
 } tg_door_status;
 void tg_door_status_get(tg_door_status *out);
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source);
+void tg_target_note(const tg_room *room, const tg_door *door, bool door_selected, bool caller_unique);
+void tg_target_state_get(tg_target_state *out);
 
 void tg_protocol_init(void);
 /* 服务发现只发布地址副本；对讲任务独占认证和 HTTP。地址变化只提前重试，不作废已有配置。 */
@@ -50,15 +54,24 @@ void tg_sip_cache_clear(void);
 /* SIP client (sip.c): registration and incoming-call notification, on its own task/socket. */
 void tg_sip_init(void);
 void tg_sip_state(tg_call_state *out);
+/* True only while this exact INVITE generation and caller are still ringing. */
+bool tg_sip_call_matches(uint32_t generation, const char *caller);
+/* Asynchronously decline this exact ringing INVITE. A stale generation is ignored. */
+bool tg_sip_decline(uint32_t generation);
 /* 服务发现等前置条件变化时提前重试拉取，不作废配置。 */
 void tg_sip_kick(void);
 bool tg_refresh(bool force, char *detail);
 bool tg_open(bool dry, char *detail, double *reply_wait);
+/* Automatic opening is allowed only when the INVITE user equals the selected door code. */
+bool tg_open_call(const char *caller, uint32_t generation, char *detail, double *reply_wait);
 bool tg_login_send(const char *phone, char **captcha, char *detail);
 bool tg_login_captcha(const char *code, bool *sent, char **captcha, char *detail);
 bool tg_login_sms(const char *code, bool *linked, char *detail);
-cJSON *tg_households(char *detail);
-cJSON *tg_doors(char *detail);
+cJSON *tg_households(char *detail, bool *cached);
+cJSON *tg_doors(const char *organization, const char *household, char *detail, bool *cached);
+cJSON *tg_target_config(void);
+bool tg_target_set(const char *organization, const char *household, const char *door_code,
+                   const char *door_number, char *detail);
 bool tg_web_start(void);
 typedef enum { TG_ROUTE_NONE, TG_ROUTE_API, TG_ROUTE_SETUP, TG_ROUTE_DENY } tg_route;
 /* Called on the shared server task for every request. */
@@ -70,6 +83,10 @@ bool tg_web_submit(httpd_req_t *req, const char *body);
 void tg_web_set_captive_portal(bool active, const char *ap_ip);
 /* Queued on the same worker as HTTP; never performs networking on the caller. */
 bool tg_submit_open(bool dry);
+/* SIP task submits one immutable automatic-open candidate when an INVITE begins. */
+bool tg_submit_call_open(uint32_t generation, const char *caller);
+/* Reuses the settings worker so HA and the web page have identical semantics. */
+bool tg_submit_call_linked_open(bool enabled);
 
 #ifdef __cplusplus
 }

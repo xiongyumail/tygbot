@@ -24,10 +24,6 @@ CONFIG_SCHEMA = cv.All(cv.Schema({
     cv.Optional(CONF_PASSWORD): cv.All(cv.string_strict, cv.Length(min=8, max=128)),
     cv.Optional("require_auth", default=True): cv.boolean,
     cv.Optional("host", default="tygbot.local"): cv.All(cv.string_strict, cv.Length(max=63)),
-    cv.Optional("organization", default=""): cv.All(cv.string_strict, cv.Length(max=127)),
-    cv.Optional("household", default=""): cv.All(cv.string_strict, cv.Length(max=127)),
-    cv.Optional("door_code", default=""): cv.All(cv.string_strict, cv.Length(max=127)),
-    cv.Optional("door_number", default=""): cv.All(cv.string_strict, cv.Length(max=15)),
 }).extend(cv.polling_component_schema("2s")),
     socket.consume_sockets(6, "tygbot"),  # 4 local clients + door TLS + independent talkback TLS
     socket.consume_sockets(2, "tygbot", socket.SocketType.UDP),  # httpd control socket + SIP
@@ -53,7 +49,7 @@ def validate_framework(config):
         raise cv.Invalid("password is required unless require_auth is false")
     if not ESPHOME_VERSION.startswith(TESTED_ESPHOME):
         _LOGGER.warning("TYGBot is tested with ESPHome %sx; found %s", TESTED_ESPHOME, ESPHOME_VERSION)
-    # HA shows the project version as the firmware: append the built commit, e.g. 1.1.0+a1b2c.
+    # HA shows the project version as the firmware: append the built commit, e.g. 1.2.0+a1b2c.
     project = fv.full_config.get().get("esphome", {}).get("project")
     commit = build_commit()
     if commit and project and "+" not in project["version"]:
@@ -95,8 +91,7 @@ async def to_code(config):
         salt = hashlib.sha256(("tygbot-esphome-v1:" + config[CONF_PASSWORD]).encode()).digest()[:16]
         digest = hashlib.pbkdf2_hmac("sha256", config[CONF_PASSWORD].encode(), salt, 200000)
         cg.add(var.set_password_verifier(salt.hex(), digest.hex()))
-    for field in ("host", "organization", "household", "door_code", "door_number"):
-        cg.add(getattr(var, "set_" + field)(config[field]))
+    cg.add(var.set_host(config["host"]))
     esp32.add_idf_component(name="espressif/esp_websocket_client", ref="1.4.0")
     for name in ("esp_http_client", "esp_http_server", "json", "nvs_flash", "mbedtls", "esp_timer"):
         esp32.include_builtin_idf_component(name)

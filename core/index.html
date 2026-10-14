@@ -6,17 +6,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="开门">
+<meta name="apple-mobile-web-app-title" content="TYGBot">
 <meta name="theme-color" content="#f5f5f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="icon" href="/icon.png">
-<title>开单元门</title>
+<title>TYGBot</title>
 <style>
   :root {
     --fg: #1f1f1f; --muted: #7a7a7a; --bg: #f5f5f4; --card: #fff; --line: #e6e6e3;
     --accent: #f08a3c; --accent-soft: #fdeee2; --ok: #2f8f5b; --ok-soft: #e3f3ea; --bad: #c4423a; --bad-soft: #fbe7e5;
-    --idle: #c9c9c6; --shadow: 0 6px 18px rgba(240, 138, 60, .28);
+    --idle: #c9c9c6; --shadow: 0 6px 18px rgba(240, 138, 60, .28); --card-shadow: 0 1px 2px rgba(0, 0, 0, .03);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -28,9 +28,9 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin: 0; padding: calc(12px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
          background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-  main { max-width: 380px; margin: 0 auto; }
+  main { max-width: 390px; margin: 0 auto; }
 
-  header { display: flex; align-items: center; justify-content: space-between; height: 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; height: 42px; padding: 0 2px; }
   h1 { font-size: 17px; font-weight: 600; margin: 0; }
   .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
            font-size: 12px; background: var(--card); border: 1px solid var(--line); color: var(--muted); }
@@ -38,7 +38,7 @@
   .badge.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
   .badge.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
 
-  .door { display: flex; flex-direction: column; align-items: center; padding: 9vh 0 4vh; }
+  .door { display: flex; flex-direction: column; align-items: center; padding: clamp(48px, 7vh, 76px) 0 clamp(28px, 3.5vh, 42px); }
   #open { position: relative; width: 148px; height: 148px; border-radius: 50%; border: none; cursor: pointer;
           background: var(--accent); color: #fff; box-shadow: var(--shadow); touch-action: manipulation;
           display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
@@ -54,16 +54,33 @@
   .ok { color: var(--ok); }
   .bad { color: var(--bad); }
 
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin-top: 12px; }
-  .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 4px 16px; margin-top: 12px;
+          box-shadow: var(--card-shadow); }
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 14px; min-height: 52px; padding: 10px 0; }
   .item + .item { border-top: 1px solid var(--line); }
-  .item .k { color: var(--muted); font-size: 13px; white-space: nowrap; }
-  .item .v { text-align: right; font-size: 14px; }
-  .item .v.act { display: flex; align-items: center; gap: 10px; }
+  .item .k { flex: 0 0 auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .item .v { min-width: 0; text-align: right; font-size: 14px; overflow-wrap: anywhere; }
+  .item .v.act { display: flex; align-items: center; justify-content: flex-end; gap: 8px; max-width: 72%; }
+  .item .v.act > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ghost { padding: 5px 12px; font-size: 13px; border-radius: 999px; border: 1px solid var(--line);
            background: transparent; color: var(--fg); cursor: pointer; }
+  #chooseTarget, #relogin { flex: 0 0 auto; color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+  .setting-copy { flex: 1; }
+  .setting-title { font-size: 14px; font-weight: 500; }
+  .setting-note { margin-top: 2px; color: var(--muted); font-size: 12px; }
+  .toggle { position: relative; display: block; flex: 0 0 auto; width: 44px; height: 26px; margin: 0; color: inherit; }
+  .toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .toggle span { position: absolute; inset: 0; border-radius: 999px; background: var(--idle); cursor: pointer; transition: background .2s; }
+  .toggle span::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px;
+                        border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .2s; }
+  .toggle input:checked + span { background: var(--ok); }
+  .toggle input:checked + span::after { transform: translateX(18px); }
+  .toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .toggle input:disabled + span { opacity: .5; cursor: default; }
+  #settingMsg { min-height: 0; padding-bottom: 8px; font-size: 12px; }
 
   #login { padding: 12px 14px 14px; }
+  #targetPanel { padding: 14px 16px 16px; }
   .head { display: flex; justify-content: space-between; align-items: center; }
   h2 { font-size: 15px; font-weight: 600; margin: 0; }
   .steps { display: flex; gap: 6px; margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
@@ -73,9 +90,9 @@
   .notice { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px; background: var(--accent-soft); color: var(--fg); }
   label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
   .row { display: flex; gap: 8px; }
-  input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 16px; border: 1px solid var(--line);
+  input, select { flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 16px; border: 1px solid var(--line);
           border-radius: 8px; background: var(--bg); color: var(--fg); }
-  input:focus { outline: none; border-color: var(--accent); background: var(--card); }
+  input:focus, select:focus { outline: none; border-color: var(--accent); background: var(--card); }
   .row button { min-width: 100px; height: 40px; padding: 0 14px; font-size: 14px; border: none; border-radius: 8px;
                 background: var(--accent); color: #fff; white-space: nowrap; cursor: pointer; }
   .row button:disabled { opacity: .45; cursor: default; }
@@ -87,13 +104,17 @@
   summary { cursor: pointer; }
   details input[type=file] { display: block; width: 100%; height: auto; padding: 8px 0; border: 0; background: none; font-size: 13px; }
   footer { margin-top: 18px; text-align: center; font-size: 12px; color: var(--muted); }
+  @media (max-height: 700px) {
+    .door { padding: 32px 0 22px; }
+    #open { width: 132px; height: 132px; }
+  }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>单元门</h1>
+    <h1>TYGBot</h1>
     <span class="badge" id="badge">连接中</span>
   </header>
 
@@ -110,8 +131,34 @@
 
   <section class="card">
     <div class="item"><span class="k">上次开门</span><span class="v" id="last">—</span></div>
-    <div class="item"><span class="k">桃园谷登录</span>
+    <div class="item"><span class="k">当前住房</span><span class="v" id="householdName">—</span></div>
+    <div class="item"><span class="k">当前门禁</span>
+      <span class="v act"><span id="doorName">—</span> <button class="ghost" id="chooseTarget" type="button">选择</button></span></div>
+    <div class="item"><span class="k">账号登录</span>
       <span class="v act"><span id="loginState">—</span> <button class="ghost" id="relogin" type="button">重新登录</button></span></div>
+    <div class="item">
+      <div class="setting-copy">
+        <div class="setting-title">来电联动开门</div>
+        <div class="setting-note" id="linkedNote">仅匹配当前门禁时自动开门，成功后结束来电</div>
+      </div>
+      <label class="toggle" aria-label="来电联动开门">
+        <input id="linkedOpen" type="checkbox" role="switch"><span aria-hidden="true"></span>
+      </label>
+    </div>
+    <div id="settingMsg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" id="targetPanel" hidden>
+    <div class="head">
+      <h2>选择住房和门禁</h2>
+      <button class="ghost" id="closeTarget" type="button">收起</button>
+    </div>
+    <label for="householdSelect">住房</label>
+    <select id="householdSelect"></select>
+    <label for="doorSelect">门禁</label>
+    <select id="doorSelect"></select>
+    <div class="row" style="margin-top:12px"><button id="saveTarget" type="button">保存选择</button></div>
+    <div id="targetMsg" role="status" aria-live="polite"></div>
   </section>
 
   <section class="card">
@@ -125,7 +172,7 @@
 
   <section class="card" id="login" hidden>
     <div class="head">
-      <h2>桃园谷登录</h2>
+      <h2>账号登录</h2>
       <button class="ghost" id="closeLogin" type="button">收起</button>
     </div>
     <div class="steps"><span data-s="1">手机号</span><span data-s="2">图形验证码</span><span data-s="3">短信验证码</span></div>
@@ -197,7 +244,8 @@ function setDoor(state) {      // idle / off / busy / done
 }
 
 // 状态靠 /events 推送：连上先收 snapshot，之后 door_start / door / login 增量更新
-const S = { login: null, last_door: null, version: null, commit: '', call: null };
+const S = { login: null, last_door: null, version: null, commit: '', call: null,
+  target: null, call_linked_open: false };
 let mine = false;   // 本页发起的开门：按钮和提示由点击流程管
 
 function render() {
@@ -212,12 +260,21 @@ function render() {
     last.replaceChildren(String(d.at || '').slice(5, 16) + ' · ', result,
       (d.ok ? ' · ' + formatSeconds(d.seconds) + ' 秒' : '') + (d.source ? ' · ' + d.source : ''));
   } else last.textContent = '—';
-  say($('loginState'), loggedOut ? '未登录' : S.login ? '已登录' : '—', loggedOut ? 'bad' : '');
+  $('householdName').textContent = S.target && S.target.household || '—';
+  $('doorName').textContent = S.target && S.target.door || '—';
+  $('chooseTarget').hidden = loggedOut;
+  say($('loginState'), loggedOut ? '未登录' : S.login ? '已登录' : '—', loggedOut ? 'bad' : S.login ? 'ok' : '');
   $('relogin').hidden = loggedOut || !$('login').hidden;
   $('ver').textContent = S.version ? ' · v' + S.version + (S.commit ? ' (' + S.commit + ')' : '') : '';
   const c = S.call, callBanner = $('call');
-  callBanner.textContent = c && c.ringing ? '门口机呼叫中' + (c.caller ? '：' + c.caller : '') : '';
+  callBanner.textContent = c && c.ringing ? (c.source || '未知门禁') + '来电中' : '';
   callBanner.hidden = !(c && c.ringing);
+  $('linkedOpen').checked = !!S.call_linked_open;
+  $('linkedNote').textContent = S.target && S.target.automatic_supported
+    ? '仅匹配当前门禁时自动开门，成功后结束来电'
+    : S.target && S.target.selected
+      ? '当前授权范围无法唯一关联来电，自动模式不可用'
+      : '请先选择当前住房和门禁';
   if (loggedOut) showLogin(false);
 }
 
@@ -231,7 +288,13 @@ const stream = new TYGBotStream({
   onDisconnected: () => setBadge('连接恢复中', 'bad'),
   events: {
     login: l => { S.login = l; render(); },
-    call: c => { S.call = c; render(); },
+    call: c => {
+      S.call = c;
+      if (!c.ringing && c.ended_by === 'declined') say($('settingMsg'), '已发送 603，来电已结束', 'ok');
+      render();
+    },
+    target: t => { S.target = t; render(); },
+    settings: s => { S.call_linked_open = !!s.call_linked_open; render(); },
     door_start: () => { if (!mine) { clearTimeout(doneTimer); setDoor('busy'); } render(); },
     door: d => {
       S.last_door = d;
@@ -344,6 +407,87 @@ $('phone').onkeydown = e => { if (e.key === 'Enter') $('send').click(); };
 $('captcha').onkeydown = e => { if (e.key === 'Enter') $('captchaOk').click(); };
 $('sms').onkeydown = e => { if (e.key === 'Enter') $('loginBtn').click(); };
 $('relogin').onclick = () => showLogin(!loggedOut);
+
+let availableHouseholds = [], availableDoors = [], savedTarget = null, doorLoadSequence = 0;
+function option(value, text) {
+  const item = document.createElement('option'); item.value = value; item.textContent = text; return item;
+}
+async function jsonRequest(url, init) {
+  const response = await fetch(url, init), value = await response.json();
+  if (!response.ok || !value.ok) throw new Error(value.detail || '请求失败');
+  return value;
+}
+async function loadDoors() {
+  const request = ++doorLoadSequence;
+  const selected = availableHouseholds[+$('householdSelect').value];
+  availableDoors = []; $('saveTarget').disabled = true;
+  $('doorSelect').replaceChildren(option('', '正在加载…')); $('doorSelect').disabled = true;
+  if (!selected) return;
+  const query = '?organization=' + encodeURIComponent(selected.organization) + '&household=' + encodeURIComponent(selected.household);
+  const value = await jsonRequest('/doors' + query);
+  if (request !== doorLoadSequence) return false;
+  availableDoors = value.doors || [];
+  $('doorSelect').replaceChildren(...availableDoors.map((door, index) => {
+    const name = [door.group, door.name].filter(Boolean).join(' · ') || '门禁';
+    return option(String(index), name + (availableDoors.length > 1 ? ' · 编号 ' + door.number : ''));
+  }));
+  let index = availableDoors.findIndex(door => savedTarget && door.code === savedTarget.door_code && door.number === savedTarget.door_number);
+  $('doorSelect').value = String(index < 0 ? 0 : index); $('doorSelect').disabled = !availableDoors.length;
+  $('saveTarget').disabled = !availableDoors.length;
+  return !!value.cached;
+}
+$('chooseTarget').onclick = async () => {
+  $('targetPanel').hidden = false; $('chooseTarget').hidden = true; say($('targetMsg'), '正在获取授权列表…');
+  try {
+    const [current, households] = await Promise.all([jsonRequest('/target'), jsonRequest('/households')]);
+    savedTarget = current.target || {}; availableHouseholds = households.households || [];
+    const labels = availableHouseholds.map(room => room.area || '住房');
+    const counts = labels.reduce((all, label) => (all[label] = (all[label] || 0) + 1, all), {}), seen = {};
+    $('householdSelect').replaceChildren(...availableHouseholds.map((room, index) => {
+      const label = labels[index], suffix = counts[label] > 1 ? ' · 住房 ' + (seen[label] = (seen[label] || 0) + 1) : '';
+      return option(String(index), label + suffix);
+    }));
+    let index = availableHouseholds.findIndex(room => room.organization === savedTarget.organization && room.household === savedTarget.household);
+    $('householdSelect').value = String(index < 0 ? 0 : index);
+    const doorsCached = await loadDoors();
+    say($('targetMsg'), households.cached && doorsCached ? '已加载最近授权列表' : '已更新授权列表');
+  } catch (error) { say($('targetMsg'), error.message || '授权列表获取失败', 'bad'); }
+};
+$('householdSelect').onchange = async () => {
+  say($('targetMsg'), '正在获取门禁…');
+  try { const cached = await loadDoors(); say($('targetMsg'), cached ? '已加载最近门禁列表' : '已更新门禁列表'); }
+  catch (error) { say($('targetMsg'), error.message || '门禁列表获取失败', 'bad'); }
+};
+$('saveTarget').onclick = async () => {
+  const room = availableHouseholds[+$('householdSelect').value], door = availableDoors[+$('doorSelect').value];
+  if (!room || !door) { say($('targetMsg'), '请选择住房和门禁', 'bad'); return; }
+  $('saveTarget').disabled = true; say($('targetMsg'), '正在验证并保存…');
+  try {
+    const value = await jsonRequest('/target', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ organization: room.organization, household: room.household,
+        door_code: door.code, door_number: door.number }) });
+    S.target = value.state || S.target; savedTarget = value.target || savedTarget;
+    S.call_linked_open = !!value.call_linked_open;
+    say($('targetMsg'), value.detail || '当前门禁已更新', 'ok'); render();
+  } catch (error) { say($('targetMsg'), error.message || '门禁选择保存失败', 'bad'); }
+  $('saveTarget').disabled = !availableDoors.length;
+};
+$('closeTarget').onclick = () => { $('targetPanel').hidden = true; $('chooseTarget').hidden = loggedOut; };
+
+$('linkedOpen').onchange = async e => {
+  const desired = e.target.checked, previous = !!S.call_linked_open;
+  e.target.disabled = true; say($('settingMsg'), '正在保存…');
+  try {
+    const r = await fetch('/settings', { method: 'POST', body: JSON.stringify({ call_linked_open: desired }),
+      headers: { 'Content-Type': 'application/json' } });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.detail || '设置保存失败');
+    S.call_linked_open = !!j.call_linked_open; say($('settingMsg'), j.detail || '设置已保存', 'ok');
+  } catch (error) {
+    S.call_linked_open = previous; say($('settingMsg'), error.message || '设置保存失败', 'bad');
+  }
+  e.target.disabled = false; render();
+};
 
 // 与热点配网页相同。只接受 ota.bin：应用镜像在 0x20 处是描述符魔数，factory.bin 开头是引导程序。
 $('upload').onclick = async () => {

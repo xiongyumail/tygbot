@@ -20,8 +20,31 @@ tg_config tg_cfg;
 SemaphoreHandle_t tg_state_lock;
 SemaphoreHandle_t tg_action_lock;
 static nvs_handle_t store;
+static bool call_linked_open;
 bool tg_storage_save(void) {
   return nvs_set_blob(store, "config", &tg_cfg, sizeof(tg_cfg)) == ESP_OK && nvs_commit(store) == ESP_OK;
+}
+bool tg_call_linked_open_get(void) {
+  xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+  bool enabled = call_linked_open;
+  xSemaphoreGive(tg_state_lock);
+  return enabled;
+}
+bool tg_call_linked_open_set(bool enabled) {
+  xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+  bool changed = call_linked_open != enabled;
+  xSemaphoreGive(tg_state_lock);
+  if (!changed) return true;
+  if (nvs_set_u8(store, "call_open", enabled ? 1 : 0) != ESP_OK || nvs_commit(store) != ESP_OK) return false;
+  xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+  call_linked_open = enabled;
+  xSemaphoreGive(tg_state_lock);
+  cJSON *event = cJSON_CreateObject();
+  if (event) {
+    cJSON_AddBoolToObject(event, "call_linked_open", enabled);
+    tg_event("settings", event); cJSON_Delete(event);
+  }
+  return true;
 }
 // Door-station call account, kept in a separate NVS key so the door config blob layout is unchanged.
 tg_talk_auth tg_talk;
@@ -97,12 +120,15 @@ void TYGBot::setup() {
   size_t talk_length = sizeof(tg_talk);
   if (nvs_get_blob(store, "talk", &tg_talk, &talk_length) != ESP_OK || talk_length != sizeof(tg_talk))
     memset(&tg_talk, 0, sizeof(tg_talk));
-  // ESPHome alone owns Wi-Fi; do not copy secrets or initialise its stack.
+  uint8_t linked = 0;
+  if (nvs_get_u8(store, "call_open", &linked) != ESP_OK) linked = 0;
+  // A cleared or migrated target must never inherit an automatic-open setting.
+  if (linked == 1 && (!*tg_cfg.organization || !*tg_cfg.household || !*tg_cfg.door_code || !*tg_cfg.door_number)) {
+    linked = 0; nvs_set_u8(store, "call_open", 0); nvs_commit(store);
+  }
+  call_linked_open = linked == 1;
+  // ESPHome alone owns Wi-Fi. Door targets come from the signed-in account and are selected at runtime.
   if (!tg_copy(tg_cfg.host, sizeof(tg_cfg.host), host_.c_str()) ||
-      !tg_copy(tg_cfg.organization, sizeof(tg_cfg.organization), organization_.c_str()) ||
-      !tg_copy(tg_cfg.household, sizeof(tg_cfg.household), household_.c_str()) ||
-      !tg_copy(tg_cfg.door_code, sizeof(tg_cfg.door_code), door_code_.c_str()) ||
-      !tg_copy(tg_cfg.door_number, sizeof(tg_cfg.door_number), door_number_.c_str()) ||
       (auth_required_ && (!unhex(salt_, tg_cfg.salt, sizeof(tg_cfg.salt)) || !unhex(hash_, tg_cfg.password_hash, sizeof(tg_cfg.password_hash))))) {
     status_ = "配置无效"; mark_failed(); return;
   }
@@ -136,8 +162,9 @@ void TYGBot::loop() {
   }
   if (!tg_storage_save()) { status_ = "会话存储失败，OTA仍可用"; mark_failed(); return; }
   tg_protocol_init();
-  tg_sip_init();
   if (!tg_web_start()) { status_ = "服务内存不足，OTA仍可用"; mark_failed(); return; }
+  // The call queue must exist before SIP can publish an incoming INVITE.
+  tg_sip_init();
   // Hold a reference so the listener stays up after the captive portal ends.
   web_server_base::global_web_server_base->init();
   ready_ = true;
@@ -159,14 +186,29 @@ void TYGBot::update() {
       door.has_warm ? door.warm_detail : logged_in_ ? "已登录" : "请在设备网页短信登录";
   if (sip_started_) {
     tg_call_state call;
+    tg_target_state target;
     tg_sip_state(&call);
+    tg_target_state_get(&target);
     call_registered_ = call.registered; call_ringing_ = call.ringing;
-    caller_ = call.caller; call_status_ = call.detail;
+    caller_id_ = call.caller;
+    char source[sizeof(target.door_name)];
+    tg_call_source(&target, call.caller, source, sizeof(source));
+    caller_ = source;
+    household_name_ = target.household_name; door_name_ = target.door_name;
+    call_status_ = call.detail;
   }
 }
 bool TYGBot::open(bool dry) {
   if (!ready_ || !network::is_connected() || !tg_time_ready()) { status_ = "设备尚未就绪，未发送开门请求"; return false; }
   if (!tg_submit_open(dry)) { status_ = "服务忙，未发送请求"; return false; }
+  return true;
+}
+bool TYGBot::call_linked_open_enabled() const { return ready_ && tg_call_linked_open_get(); }
+bool TYGBot::set_call_linked_open(bool enabled) {
+  if (!ready_ || !tg_submit_call_linked_open(enabled)) {
+    status_ = "服务忙，联动设置未保存";
+    return false;
+  }
   return true;
 }
 void TYGBot::refresh_call() { if (sip_started_) tg_talk_request(); }

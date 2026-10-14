@@ -1,14 +1,14 @@
 substitutions:
   device_name: tygbot
   device_friendly_name: TYGBot
-  repository_ref: v1.1.0
+  repository_ref: v1.2.0
 
 esphome:
   name: ${device_name}
   friendly_name: ${device_friendly_name}
   project:
     name: xiongyu.tygbot
-    version: "1.1.0"
+    version: "1.2.0"
   compile_process_limit: 2
 
 esp32:
@@ -59,8 +59,8 @@ esp32_improv:
 
 esp32_ble_tracker:
   scan_parameters:
-    interval: 1100ms
-    window: 1100ms
+    interval: 320ms
+    window: 300ms
     active: true
     continuous: false
 
@@ -86,7 +86,8 @@ external_components:
       url: https://github.com/xiongyumail/tygbot
       ref: ${repository_ref}
     components: [tygbot]
-    refresh: never
+    # Builder 2026.9 may otherwise reuse a checkout from an older pinned ref.
+    refresh: always
 
 tygbot:
   id: tygbot_core
@@ -111,11 +112,22 @@ button:
     # Recovery control is disabled by default.
     disabled_by_default: true
   - platform: template
-    name: Refresh Call 重新获取对讲配置
+    name: Refresh Call 重新获取来电配置
     icon: mdi:phone-sync
     entity_category: config
     on_press:
       - lambda: id(tygbot_core).refresh_call();
+
+switch:
+  - platform: template
+    name: Call Linked Open 来电联动开门
+    icon: mdi:door-open
+    entity_category: config
+    lambda: return id(tygbot_core).call_linked_open_enabled();
+    turn_on_action:
+      - lambda: id(tygbot_core).set_call_linked_open(true);
+    turn_off_action:
+      - lambda: id(tygbot_core).set_call_linked_open(false);
 
 binary_sensor:
   - platform: template
@@ -124,7 +136,7 @@ binary_sensor:
     entity_category: diagnostic
     lambda: return id(tygbot_core).ready();
   - platform: template
-    name: Logged In 桃园谷已登录
+    name: Logged In 账号登录
     icon: mdi:account-check
     lambda: return id(tygbot_core).logged_in();
   - platform: template
@@ -133,17 +145,20 @@ binary_sensor:
     entity_category: diagnostic
     lambda: return id(tygbot_core).busy();
   - platform: template
-    name: Door Call 门口机呼叫
+    name: Door Call 门禁来电
     device_class: occupancy
     icon: mdi:doorbell
     lambda: return id(tygbot_core).call_ringing();
   - platform: template
-    name: Call Registered 对讲已注册
+    name: Call Registered 来电服务已连接
     device_class: connectivity
     entity_category: diagnostic
     lambda: return id(tygbot_core).call_registered();
 
 text_sensor:
+  # ESPHome derives text-sensor identity from name and folds non-ASCII text to
+  # underscores. Keep distinct ASCII prefixes; Home Assistant can use Chinese
+  # display names without changing these stable identities.
   # Published only on change, so the API and log do not repeat unchanged text every 2 s.
   - platform: template
     id: tygbot_status
@@ -165,7 +180,7 @@ text_sensor:
     update_interval: 2s
   - platform: template
     id: tygbot_caller
-    name: Caller 呼叫来源
+    name: Caller 来电来源
     icon: mdi:phone-incoming
     lambda: |-
       const auto &v = id(tygbot_core).caller();
@@ -173,8 +188,37 @@ text_sensor:
       return v;
     update_interval: 2s
   - platform: template
+    id: tygbot_household
+    name: Household 当前住房
+    icon: mdi:home-map-marker
+    lambda: |-
+      const auto &v = id(tygbot_core).household_name();
+      if (id(tygbot_household).has_state() && id(tygbot_household).state == v) return {};
+      return v;
+    update_interval: 2s
+  - platform: template
+    id: tygbot_door
+    name: Door 当前门禁
+    icon: mdi:door
+    lambda: |-
+      const auto &v = id(tygbot_core).door_name();
+      if (id(tygbot_door).has_state() && id(tygbot_door).state == v) return {};
+      return v;
+    update_interval: 2s
+  - platform: template
+    id: tygbot_caller_id
+    name: Caller ID 来电标识
+    icon: mdi:identifier
+    entity_category: diagnostic
+    disabled_by_default: true
+    lambda: |-
+      const auto &v = id(tygbot_core).caller_id();
+      if (id(tygbot_caller_id).has_state() && id(tygbot_caller_id).state == v) return {};
+      return v;
+    update_interval: 2s
+  - platform: template
     id: tygbot_call_status
-    name: Call Status 对讲状态
+    name: Call Status 来电服务状态
     icon: mdi:phone-check
     entity_category: diagnostic
     lambda: |-

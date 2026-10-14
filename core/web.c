@@ -27,7 +27,7 @@ extern const unsigned char setup_start[] asm("_binary_setup_html_start");
 extern const unsigned char setup_end[] asm("_binary_setup_html_end");
 /* Measured peak about 3.4 KB (snapshot JSON); 3 KB once overflowed. */
 #define TG_SSE_STACK_BYTES 6144
-#define TG_WEB_VERSION "1.1.0"
+#define TG_WEB_VERSION "1.2.0"
 typedef struct { uint32_t sequence; char kind[16], data[TG_EVENT_SIZE]; } event_record;
 static event_record history[TG_EVENT_COUNT];
 static uint32_t sequence;
@@ -39,7 +39,7 @@ static char warm_detail[TG_DETAIL], warm_at[24];
 static bool warm_ok;
 static int64_t manual_until;
 static SemaphoreHandle_t stream_slots;
-static QueueHandle_t jobs, requests;
+static QueueHandle_t jobs, call_jobs, requests;
 /* Set when a request's ownership moves to the worker or an SSE task. */
 static bool handed_off;
 static bool web_ready;
@@ -47,6 +47,8 @@ static char cached_basic[256];
 static uint32_t sse_stack_min_free = UINT32_MAX;
 static uint32_t worker_stack_min_free = UINT32_MAX;
 static uint32_t sse_opened, sse_closed;
+static uint32_t linked_success_generation;
+static tg_target_state target;
 bool tg_http_auth_required = true; /* Native defaults remain password-protected. */
 static bool captive_active;
 static char captive_ip[INET_ADDRSTRLEN];
@@ -85,6 +87,37 @@ void tg_door_status_get(tg_door_status *out) {
     out->has_warm = *warm_at != 0; tg_copy(out->warm_detail, sizeof(out->warm_detail), warm_detail);
     xSemaphoreGive(tg_state_lock);
 }
+void tg_target_state_get(tg_target_state *out) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    *out = target;
+    xSemaphoreGive(tg_state_lock);
+}
+static cJSON *target_json(const tg_target_state *state) {
+    cJSON *v = cJSON_CreateObject();
+    cJSON_AddBoolToObject(v, "selected", state->door_selected);
+    cJSON_AddBoolToObject(v, "automatic_supported", state->caller_unique);
+    cJSON_AddStringToObject(v, "household", state->household_name);
+    cJSON_AddStringToObject(v, "door", state->door_name);
+    return v;
+}
+void tg_target_note(const tg_room *selected_room, const tg_door *selected_door, bool selected, bool caller_unique) {
+    tg_target_state next = {0};
+    bool has_household = selected_room && *selected_room->household;
+    next.door_selected = has_household && selected && selected_door;
+    next.caller_unique = next.door_selected && caller_unique;
+    if (has_household) tg_copy(next.household_name, sizeof(next.household_name), selected_room->area);
+    if (next.door_selected) {
+        if (*selected_door->group && *selected_door->name)
+            snprintf(next.door_name, sizeof(next.door_name), "%s · %s", selected_door->group, selected_door->name);
+        else tg_copy(next.door_name, sizeof(next.door_name), *selected_door->name ? selected_door->name : "门禁");
+        tg_copy(next.door_code, sizeof(next.door_code), selected_door->code);
+    }
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool changed = memcmp(&target, &next, sizeof(next)) != 0;
+    target = next;
+    xSemaphoreGive(tg_state_lock);
+    if (changed) { cJSON *v = target_json(&next); tg_event("target", v); cJSON_Delete(v); }
+}
 void tg_set_busy(bool value) { xSemaphoreTake(tg_state_lock, portMAX_DELAY); busy = value; xSemaphoreGive(tg_state_lock); }
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source) {
     cJSON *v = cJSON_CreateObject(); char at[24]; tg_timestamp(at, sizeof(at), false);
@@ -99,6 +132,7 @@ void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait
 }
 cJSON *tg_snapshot(void) {
     cJSON *v = cJSON_CreateObject();
+    tg_target_state selected;
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
     cJSON_AddBoolToObject(v, "ok", true); cJSON_AddBoolToObject(v, "busy", busy);
     cJSON_AddItemToObject(v, "last_door", *last_door ? cJSON_Parse(last_door) : cJSON_CreateNull());
@@ -114,12 +148,19 @@ cJSON *tg_snapshot(void) {
     } else cJSON_AddNullToObject(v, "last_warm_up");
     cJSON_AddStringToObject(v, "version", TG_WEB_VERSION);
     cJSON_AddStringToObject(v, "commit", tg_build_commit);
+    selected = target;
     xSemaphoreGive(tg_state_lock);
+    cJSON_AddItemToObject(v, "target", target_json(&selected));
+    cJSON_AddBoolToObject(v, "call_linked_open", tg_call_linked_open_get());
     tg_call_state state; tg_sip_state(&state);
     cJSON *call = cJSON_CreateObject();
     cJSON_AddBoolToObject(call, "registered", state.registered);
     cJSON_AddBoolToObject(call, "ringing", state.ringing);
-    cJSON_AddStringToObject(call, "caller", state.caller); cJSON_AddStringToObject(call, "detail", state.detail);
+    char source[sizeof(selected.door_name)];
+    bool matched = tg_call_source(&selected, state.caller, source, sizeof(source));
+    cJSON_AddStringToObject(call, "source", source);
+    cJSON_AddBoolToObject(call, "matched", matched); cJSON_AddStringToObject(call, "detail", state.detail);
+    cJSON_AddStringToObject(call, "ended_by", state.ended_by);
     cJSON_AddItemToObject(v, "call", call);
     return v;
 }
@@ -128,6 +169,10 @@ static esp_err_t respond(httpd_req_t *req, int code, cJSON *v) {
     httpd_resp_set_status(req, status); httpd_resp_set_type(req, "application/json; charset=utf-8"); httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     char *text = cJSON_PrintUnformatted(v); cJSON_Delete(v);
     esp_err_t rc = httpd_resp_send(req, text ? text : "{\"ok\":false,\"detail\":\"内存不足\"}", HTTPD_RESP_USE_STRLEN); free(text); return rc;
+}
+static void deny_framing(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'");
 }
 static esp_err_t failure(httpd_req_t *req, int code, const char *detail) {
     cJSON *v = cJSON_CreateObject(); cJSON_AddBoolToObject(v, "ok", false); cJSON_AddStringToObject(v, "detail", detail); return respond(req, code, v);
@@ -286,8 +331,26 @@ static void sse_task(void *arg) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY); sse_closed++; xSemaphoreGive(tg_state_lock);
     xSemaphoreGive(stream_slots); vTaskDelete(NULL);
 }
-typedef enum { JOB_OPEN, JOB_DRY, JOB_SEND, JOB_CAPTCHA, JOB_SMS, JOB_HOUSEHOLDS, JOB_DOORS } job_kind;
-typedef struct { httpd_req_t *req; job_kind kind; char value[16], source[16]; int64_t submitted; } job;
+typedef enum { JOB_OPEN, JOB_DRY, JOB_SEND, JOB_CAPTCHA, JOB_SMS, JOB_HOUSEHOLDS, JOB_DOORS,
+               JOB_TARGET_GET, JOB_TARGET_SET, JOB_SETTING } job_kind;
+typedef struct {
+    httpd_req_t *req; job_kind kind; char value[16], source[16]; int64_t submitted;
+    uint32_t call_generation; bool automatic;
+    char caller[64], organization[128], household[128], door_code[128], door_number[16];
+} job;
+typedef struct { uint32_t generation; int64_t submitted; char caller[64]; } call_job;
+static uint32_t ringing_call(char *caller, size_t capacity) {
+    tg_call_state call; tg_sip_state(&call);
+    if (caller && capacity) tg_copy(caller, capacity, call.ringing ? call.caller : "");
+    return call.ringing ? call.generation : 0;
+}
+static uint32_t ringing_generation(void) { return ringing_call(NULL, 0); }
+bool tg_submit_call_open(uint32_t generation, const char *caller) {
+    if (!call_jobs || !generation || !caller || !*caller || !tg_call_linked_open_get()) return false;
+    call_job pending = {.generation = generation, .submitted = esp_timer_get_time()};
+    if (!tg_copy(pending.caller, sizeof(pending.caller), caller)) return false;
+    return xQueueOverwrite(call_jobs, &pending) == pdTRUE;
+}
 /* Latest connection check shown as the HA status. */
 static void note_check(bool ok, const char *detail) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
@@ -302,7 +365,16 @@ static int64_t warm(void) {
 static void worker(void *unused) {
     job j; int64_t next_warm = esp_timer_get_time() + 2000000;
     for (;;) {
-        if (!xQueueReceive(jobs, &j, pdMS_TO_TICKS(200))) {
+        call_job pending;
+        bool have_call = xQueueReceive(call_jobs, &pending, 0) == pdTRUE;
+        bool have_job = have_call || xQueueReceive(jobs, &j, pdMS_TO_TICKS(200)) == pdTRUE;
+        if (!have_job && xQueueReceive(call_jobs, &pending, 0) == pdTRUE) have_call = have_job = true;
+        if (have_call) {
+            memset(&j, 0, sizeof(j)); j.kind = JOB_OPEN; j.submitted = pending.submitted;
+            j.call_generation = pending.generation; j.automatic = true;
+            tg_copy(j.caller, sizeof(j.caller), pending.caller); strcpy(j.source, "来电联动");
+        }
+        if (!have_job) {
             if (esp_timer_get_time() >= next_warm && esp_timer_get_time() >= manual_until && tg_time_ready()) {
                 int64_t delay = 1000000;
                 if (xSemaphoreTake(tg_action_lock, 0)) { delay = warm(); xSemaphoreGive(tg_action_lock); }
@@ -310,25 +382,69 @@ static void worker(void *unused) {
             }
             continue;
         }
+        if (j.automatic && (!tg_call_linked_open_get() || !tg_sip_call_matches(j.call_generation, j.caller))) {
+            memset(&j, 0, sizeof(j)); continue;
+        }
         xSemaphoreTake(tg_action_lock, portMAX_DELAY);
         char detail[TG_DETAIL] = ""; cJSON *result = cJSON_CreateObject(); int code = 200; bool ok = false;
         int64_t begin = esp_timer_get_time();
-        if (begin - j.submitted > 10000000) { strcpy(detail, "排队已超时，未执行"); code = 409; }
+        if (!j.automatic && begin - j.submitted > 10000000) { strcpy(detail, "排队已超时，未执行"); code = 409; }
+        else if (j.automatic && (!tg_call_linked_open_get() || !tg_sip_call_matches(j.call_generation, j.caller))) {
+            strcpy(detail, "来电已结束或设置已关闭，未开门"); code = 409;
+        }
         else if (j.kind == JOB_OPEN || j.kind == JOB_DRY) {
             bool dry = j.kind == JOB_DRY; double reply_wait = 0;
-            if (!dry) {
+            if (!dry && j.call_generation && linked_success_generation == j.call_generation) {
+                strcpy(detail, "本次来电已经开门，未重复执行"); code = 409;
+            } else if (!dry) {
                 tg_set_busy(true); cJSON *start = cJSON_CreateObject(); cJSON_AddStringToObject(start, "source", j.source); cJSON_AddNumberToObject(start, "ts", time(NULL)); tg_event("door_start", start); cJSON_Delete(start);
+                ok = j.automatic ? tg_open_call(j.caller, j.call_generation, detail, &reply_wait) : tg_open(false, detail, &reply_wait);
+                double elapsed = (esp_timer_get_time() - j.submitted) / 1000000.0;
+                if (ok && j.call_generation) {
+                    linked_success_generation = j.call_generation;
+                    if (tg_sip_decline(j.call_generation))
+                        strncat(detail, "；正在发送 603 结束来电", TG_DETAIL - strlen(detail) - 1);
+                    else
+                        strncat(detail, "；来电已结束，无需发送 603", TG_DETAIL - strlen(detail) - 1);
+                }
+                tg_door_note(ok, detail, elapsed, reply_wait, j.source); tg_set_busy(false);
+                cJSON_AddNumberToObject(result, "seconds", elapsed); code = ok ? 200 : 500;
+            } else {
+                ok = tg_open(true, detail, &reply_wait);
+                double elapsed = (esp_timer_get_time() - j.submitted) / 1000000.0;
+                note_check(ok, detail); cJSON_AddNumberToObject(result, "seconds", elapsed); code = ok ? 200 : 500;
             }
-            ok = tg_open(dry, detail, &reply_wait);
-            double elapsed = (esp_timer_get_time() - j.submitted) / 1000000.0;
-            if (!dry) { tg_door_note(ok, detail, elapsed, reply_wait, j.source); tg_set_busy(false); }
-            else note_check(ok, detail);
-            cJSON_AddNumberToObject(result, "seconds", elapsed); code = ok ? 200 : 500;
         } else if (j.kind == JOB_HOUSEHOLDS || j.kind == JOB_DOORS) {
             const char *key = j.kind == JOB_HOUSEHOLDS ? "households" : "doors";
-            cJSON *list = j.kind == JOB_HOUSEHOLDS ? tg_households(detail) : tg_doors(detail);
+            bool cached = false;
+            cJSON *list = j.kind == JOB_HOUSEHOLDS ? tg_households(detail, &cached) : tg_doors(j.organization, j.household, detail, &cached);
             ok = list != NULL; cJSON_AddItemToObject(result, key, list ? list : cJSON_CreateArray()); code = ok ? 200 : 409;
-            if (ok) strcpy(detail, "已获取授权列表");
+            if (ok) { cJSON_AddBoolToObject(result, "cached", cached); strcpy(detail, cached ? "已加载最近授权列表" : "已更新授权列表"); }
+        } else if (j.kind == JOB_TARGET_GET) {
+            cJSON_AddItemToObject(result, "target", tg_target_config()); ok = true;
+            strcpy(detail, "已获取当前门禁选择");
+        } else if (j.kind == JOB_TARGET_SET) {
+            ok = tg_target_set(j.organization, j.household, j.door_code, j.door_number, detail);
+            code = ok ? 200 : 409;
+            if (ok) {
+                cJSON_AddItemToObject(result, "target", tg_target_config());
+                tg_target_state selected; tg_target_state_get(&selected);
+                cJSON_AddItemToObject(result, "state", target_json(&selected));
+                cJSON_AddBoolToObject(result, "call_linked_open", tg_call_linked_open_get());
+            }
+        } else if (j.kind == JOB_SETTING) {
+            bool enabled = !strcmp(j.value, "1");
+            tg_target_state selected; tg_target_state_get(&selected);
+            if (enabled && !selected.caller_unique) {
+                strcpy(detail, selected.door_selected ? "当前授权范围无法唯一关联来电，不能开启自动模式" : "请先选择当前住房和门禁");
+                code = 409;
+            } else {
+                ok = tg_call_linked_open_set(enabled); code = ok ? 200 : 500;
+            }
+            if (ok) {
+                strcpy(detail, enabled ? "来电联动开门已开启，下次来电生效" : "来电联动开门已关闭");
+                cJSON_AddBoolToObject(result, "call_linked_open", enabled);
+            } else if (!*detail) strcpy(detail, "设置保存失败");
         } else {
             manual_until = esp_timer_get_time() + 300000000LL;
             char *captcha = NULL; const char *next = NULL;
@@ -360,17 +476,36 @@ static void worker(void *unused) {
 }
 bool tg_submit_open(bool dry) {
     if (!jobs) return false;
-    job j = {.kind = dry ? JOB_DRY : JOB_OPEN, .submitted = esp_timer_get_time()};
+    job j = {.kind = dry ? JOB_DRY : JOB_OPEN, .submitted = esp_timer_get_time(),
+             .call_generation = dry ? 0 : ringing_generation()};
     strcpy(j.source, "HA");
+    return xQueueSend(jobs, &j, 0) == pdTRUE;
+}
+bool tg_submit_call_linked_open(bool enabled) {
+    if (!jobs) return false;
+    job j = {.kind = JOB_SETTING, .submitted = esp_timer_get_time()};
+    strcpy(j.value, enabled ? "1" : "0");
     return xQueueSend(jobs, &j, 0) == pdTRUE;
 }
 static esp_err_t queue_job(httpd_req_t *req, job_kind kind, const char *value) {
     job j = {.kind = kind, .submitted = esp_timer_get_time()};
+    if (kind == JOB_OPEN) j.call_generation = ringing_generation();
     if (value && !tg_copy(j.value, sizeof(j.value), value)) return failure(req, 400, "字段过长");
     strcpy(j.source, "HTTP"); char query[96], source[16];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK && httpd_query_key_value(query, "from", source, sizeof(source)) == ESP_OK)
         strcpy(j.source, !strcmp(source, "ha") ? "HA" : !strcmp(source, "web") ? "网页" : "HTTP");
     j.req = req;
+    if (!xQueueSend(jobs, &j, 0)) return failure(req, 409, "服务忙，请稍后再试");
+    handed_off = true; return ESP_OK;
+}
+static esp_err_t queue_target(httpd_req_t *req, job_kind kind, const char *organization,
+                              const char *household, const char *door_code, const char *door_number) {
+    job j = {.req = req, .kind = kind, .submitted = esp_timer_get_time()};
+    if ((organization && !tg_copy(j.organization, sizeof(j.organization), organization))
+        || (household && !tg_copy(j.household, sizeof(j.household), household))
+        || (door_code && !tg_copy(j.door_code, sizeof(j.door_code), door_code))
+        || (door_number && !tg_copy(j.door_number, sizeof(j.door_number), door_number)))
+        return failure(req, 400, "门禁选择字段过长");
     if (!xQueueSend(jobs, &j, 0)) return failure(req, 409, "服务忙，请稍后再试");
     handed_off = true; return ESP_OK;
 }
@@ -410,7 +545,7 @@ esp_err_t tg_web_deny(httpd_req_t *req) { return failure(req, 403, "固件升级
 esp_err_t tg_web_setup_page(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (path_is(req, "/icon.png")) { httpd_resp_set_type(req, "image/png"); return httpd_resp_send(req, (const char *)icon_start, icon_end-icon_start); }
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_type(req, "text/html; charset=utf-8"); deny_framing(req);
     /* The hotspot page shows the version and build commit, filled in when served. */
     static const char mark[] = "__TG_VERSION__";
     const char *page = (const char *)setup_start, *at = NULL;
@@ -443,7 +578,12 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
         cJSON_AddStringToObject(v, "detail", "此设备无需网页密码"); return respond(req, 200, v);
     }
     if (req->method == HTTP_GET) {
-        if (!strcmp(path, "/status") || !strcmp(path, "/health")) return respond(req, 200, tg_snapshot());
+        if (!strcmp(path, "/status")) return respond(req, 200, tg_snapshot());
+        if (!strcmp(path, "/health")) {
+            cJSON *v = cJSON_CreateObject(); cJSON_AddBoolToObject(v, "ok", true);
+            cJSON_AddStringToObject(v, "version", TG_WEB_VERSION); cJSON_AddStringToObject(v, "commit", tg_build_commit);
+            return respond(req, 200, v);
+        }
         if (!strcmp(path, "/diagnostics")) {
             cJSON *v = cJSON_CreateObject();
             cJSON_AddStringToObject(v, "target", "esp32c3"); cJSON_AddStringToObject(v, "version", TG_WEB_VERSION);
@@ -472,7 +612,7 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
             return respond(req, 200, v);
         }
         if (!strcmp(path, "/") || !strcmp(path, "/auth")) {
-            httpd_resp_set_type(req, "text/html; charset=utf-8"); httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            httpd_resp_set_type(req, "text/html; charset=utf-8"); httpd_resp_set_hdr(req, "Cache-Control", "no-store"); deny_framing(req);
             return !strcmp(path, "/") ? httpd_resp_send(req, (const char *)index_start, index_end-index_start) : httpd_resp_send(req, (const char *)auth_start, auth_end-auth_start);
         }
         if (!strcmp(path, "/icon.png")) { httpd_resp_set_type(req, "image/png"); return httpd_resp_send(req, (const char *)icon_start, icon_end-icon_start); }
@@ -482,7 +622,15 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
             return httpd_resp_send(req, (const char *)events_start, events_end-events_start);
         }
         if (!strcmp(path, "/households")) return queue_job(req, JOB_HOUSEHOLDS, NULL);
-        if (!strcmp(path, "/doors")) return queue_job(req, JOB_DOORS, NULL);
+        if (!strcmp(path, "/doors")) {
+            char query[384] = "", organization[128] = "", household[128] = "";
+            if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+                httpd_query_key_value(query, "organization", organization, sizeof(organization));
+                httpd_query_key_value(query, "household", household, sizeof(household));
+            }
+            return queue_target(req, JOB_DOORS, organization, household, NULL, NULL);
+        }
+        if (!strcmp(path, "/target")) return queue_target(req, JOB_TARGET_GET, NULL, NULL, NULL, NULL);
         if (!strcmp(path, "/events")) {
             if (!xSemaphoreTake(stream_slots, 0)) return failure(req, 503, "最多两路 SSE 订阅");
             xSemaphoreTake(tg_state_lock, portMAX_DELAY); sse_opened++; xSemaphoreGive(tg_state_lock);
@@ -498,6 +646,26 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
         if (!strcmp(path, "/door")) {
             char query[96], dry[8]; bool is_dry = httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK && httpd_query_key_value(query, "dry", dry, sizeof(dry)) == ESP_OK && !strcmp(dry, "1");
             return queue_job(req, is_dry ? JOB_DRY : JOB_OPEN, NULL);
+        }
+        if (!strcmp(path, "/settings")) {
+            cJSON *json = read_json(body); cJSON *item = json ? cJSON_GetObjectItemCaseSensitive(json, "call_linked_open") : NULL;
+            if (!cJSON_IsBool(item)) { cJSON_Delete(json); return failure(req, 400, "设置格式错误"); }
+            const char *value = cJSON_IsTrue(item) ? "1" : "0"; esp_err_t rc = queue_job(req, JOB_SETTING, value);
+            cJSON_Delete(json); return rc;
+        }
+        if (!strcmp(path, "/target")) {
+            cJSON *json = read_json(body);
+            const char *organization = tg_string(json, "organization"), *household = tg_string(json, "household");
+            const char *door_code = tg_string(json, "door_code"), *door_number = tg_string(json, "door_number");
+            if (!json || !*organization || !*household || !*door_code || !*door_number) {
+                cJSON_Delete(json); return failure(req, 400, "请选择住房和门禁");
+            }
+            char org[128], house[128], code[128], number[16];
+            bool copied = tg_copy(org, sizeof(org), organization) && tg_copy(house, sizeof(house), household)
+                && tg_copy(code, sizeof(code), door_code) && tg_copy(number, sizeof(number), door_number);
+            cJSON_Delete(json);
+            return copied ? queue_target(req, JOB_TARGET_SET, org, house, code, number)
+                          : failure(req, 400, "门禁选择字段过长");
         }
         job_kind kind;
         if (!strcmp(path, "/login/send")) kind = JOB_SEND;
@@ -533,9 +701,10 @@ bool tg_web_submit(httpd_req_t *req, const char *body) {
 }
 bool tg_web_start(void) {
     snprintf(boot, sizeof(boot), "%08lx", (unsigned long)esp_random());
-    stream_slots = xSemaphoreCreateCounting(2, 2); jobs = xQueueCreate(2, sizeof(job)); requests = xQueueCreate(4, sizeof(web_request));
+    stream_slots = xSemaphoreCreateCounting(2, 2); jobs = xQueueCreate(2, sizeof(job));
+    call_jobs = xQueueCreate(1, sizeof(call_job)); requests = xQueueCreate(4, sizeof(web_request));
     /* On failure ESPHome networking and OTA stay up; nothing is torn down. */
-    if (!stream_slots || !jobs || !requests) return false;
+    if (!stream_slots || !jobs || !call_jobs || !requests) return false;
     web_ready = xTaskCreate(web_task, "tyg-web", 6144, NULL, 5, NULL) == pdPASS
         && xTaskCreate(worker, "tyg-worker", 8192, NULL, 5, NULL) == pdPASS;
     return web_ready;

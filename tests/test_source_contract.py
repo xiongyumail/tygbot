@@ -97,6 +97,20 @@ class SourceContract(unittest.TestCase):
         self.assertIn("stream.pause()", html)
         self.assertIn("stream.resume()", html)
 
+    def test_embedded_web_assets_match_sources(self):
+        assets = (COMPONENT / "assets.c").read_text()
+        for filename, symbol in (("index.html", "index"), ("login.html", "auth"),
+                                 ("icon.png", "icon"), ("events.js", "events"),
+                                 ("setup.html", "setup")):
+            block = re.search(
+                rf"const unsigned char {symbol}_start\[\] = \{{\n(.*?)\n\}};\n"
+                rf"const unsigned int {symbol}_size = (\d+);", assets, re.S)
+            self.assertIsNotNone(block, symbol)
+            embedded = bytes(map(int, re.findall(r"\d+", block.group(1))))
+            source = (ROOT / "core" / filename).read_bytes()
+            self.assertEqual(int(block.group(2)), len(source), symbol)
+            self.assertEqual(embedded, source, symbol)
+
     def test_web_ui_shares_esphome_server_with_captive_portal(self):
         config = PACKAGE.read_text()
         self.assertNotIn("use_address:", config)
@@ -123,11 +137,11 @@ class SourceContract(unittest.TestCase):
     def test_remote_package_and_component_are_version_pinned(self):
         example = (ROOT / "tygbot.example.yaml").read_text()
         package = PACKAGE.read_text()
-        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.1.0", example)
-        self.assertIn("repository_ref: v1.1.0", package)
+        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.2.0", example)
+        self.assertIn("repository_ref: v1.2.0", package)
         self.assertIn("ref: ${repository_ref}", package)
         self.assertNotIn("type: local", package)
-        self.assertIn("refresh: never", package)
+        self.assertIn("refresh: always", package)
 
     def test_provisioning_uses_standard_esphome_components(self):
         package = PACKAGE.read_text()
@@ -206,6 +220,89 @@ class SourceContract(unittest.TestCase):
         self.assertNotIn("sip_started_ = true;\n  tg_talk_request();", adapter)
         self.assertIn('nvs_set_blob(store, "talk"', adapter)
         self.assertIn("static_assert(sizeof(tg_config) == 936", adapter)
+
+    def test_call_linked_open_is_transaction_bound_and_separately_persisted(self):
+        sip = (ROOT / "core/sip.c").read_text()
+        web = (ROOT / "core/web.c").read_text()
+        adapter = (COMPONENT / "tygbot.cpp").read_text()
+        # A confirmed door result can only decline the exact INVITE generation captured for that job.
+        self.assertIn("j.call_generation", web)
+        self.assertIn("if (ok && j.call_generation)", web)
+        self.assertIn("tg_sip_decline(j.call_generation)", web)
+        self.assertIn('build_response(c, buf, 603, "Decline"', sip)
+        self.assertIn("active_generation == generation", sip)
+        # SIP remains the only task that writes its UDP socket.
+        self.assertNotIn("send(c.fd", web)
+        # The safety-sensitive setting defaults off and does not change the fixed config blob.
+        self.assertIn('nvs_get_u8(store, "call_open", &linked)', adapter)
+        self.assertIn('nvs_set_u8(store, "call_open", enabled ? 1 : 0)', adapter)
+        self.assertIn("uint8_t linked = 0", adapter)
+        self.assertIn('if (!strcmp(path, "/settings"))', web)
+        self.assertIn('cJSON_AddBoolToObject(v, "call_linked_open"', web)
+
+    def test_call_linked_open_user_words(self):
+        page = (ROOT / "core/index.html").read_text()
+        package = PACKAGE.read_text()
+        self.assertIn("<h1>TYGBot</h1>", page)
+        self.assertIn("来电联动开门", page)
+        self.assertIn("仅匹配当前门禁时自动开门，成功后结束来电", page)
+        self.assertIn("账号登录", page)
+        self.assertNotIn("桃园谷登录", page)
+        self.assertIn("name: Logged In 账号登录", package)
+        self.assertNotIn("桃园谷已登录", package)
+        self.assertIn("未知门禁", page)
+        self.assertNotIn("门口机呼叫中", page)
+        self.assertIn("name: Call Linked Open 来电联动开门", package)
+        self.assertIn("lambda: return id(tygbot_core).call_linked_open_enabled();", package)
+        self.assertIn("id(tygbot_core).set_call_linked_open(true);", package)
+        self.assertIn("id(tygbot_core).set_call_linked_open(false);", package)
+        self.assertIn("tg_submit_call_linked_open", (COMPONENT / "tygbot.cpp").read_text())
+
+    def test_target_sensor_names_keep_unique_ascii_identity(self):
+        package = PACKAGE.read_text()
+        # ESPHome 2026.9 derives entity identity from the name. Pure Chinese
+        # names all sanitize to underscores and collide within text_sensor.
+        for name in ("Household 当前住房", "Door 当前门禁", "Caller ID 来电标识"):
+            self.assertIn(f"name: {name}", package)
+
+    def test_call_source_is_matched_before_automatic_open(self):
+        web = (ROOT / "core/web.c").read_text()
+        protocol = (ROOT / "core/protocol.c").read_text()
+        sip = (ROOT / "core/sip.c").read_text()
+        self.assertIn("tg_open_call(j.caller, j.call_generation", web)
+        self.assertIn("strcmp(caller, door.code)", protocol)
+        self.assertIn("来电来源与当前门禁不匹配，未开门", protocol)
+        self.assertIn('cJSON_AddBoolToObject(v, "matched", matched)', sip)
+        self.assertIn("tg_submit_call_open(generation, who)", sip)
+        self.assertIn("xQueueOverwrite(call_jobs", web)
+        self.assertIn("tg_sip_call_matches(j.call_generation, j.caller)", web)
+        self.assertIn("door_caller_unique", protocol)
+        self.assertIn("tg_caller_target_unique", protocol)
+        self.assertNotIn("linked_seen_generation", web)
+        self.assertNotIn('cJSON_AddStringToObject(call, "caller"', web)
+
+    def test_target_selection_is_validated_and_persisted(self):
+        web = (ROOT / "core/web.c").read_text()
+        protocol = (ROOT / "core/protocol.c").read_text()
+        adapter = (COMPONENT / "tygbot.cpp").read_text()
+        self.assertIn('!strcmp(path, "/target")', web)
+        self.assertIn("refresh(&candidate, true, false", protocol)
+        self.assertIn("tg_storage_save()", protocol)
+        self.assertNotIn("yaml_target", adapter)
+        codegen = (COMPONENT / "__init__.py").read_text()
+        for legacy in ('cv.Optional("organization"', 'cv.Optional("household"',
+                       'cv.Optional("door_code"', 'cv.Optional("door_number"'):
+            self.assertNotIn(legacy, codegen)
+
+    def test_target_lists_reuse_latest_successful_refresh(self):
+        protocol = (ROOT / "core/protocol.c").read_text()
+        self.assertIn("cache_households(v)", protocol)
+        self.assertIn("cache_doors(&room, available)", protocol)
+        self.assertIn("cache_array(households_cache)", protocol)
+        self.assertIn("cache_array(doors_cache)", protocol)
+        self.assertIn("selection_cache_clear();", protocol)
+        self.assertIn("refresh(&candidate, true, false", protocol)
+        self.assertIn('cJSON_AddBoolToObject(result, "cached", cached)', (ROOT / "core/web.c").read_text())
 
     def test_test_use_notice_is_visible(self):
         notice = "仅供授权测试使用，非官方项目。"

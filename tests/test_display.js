@@ -25,7 +25,11 @@ function fixture() {
     setInterval() { return 1; }, clearInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, FormData, DataView,
     window: { addEventListener() {}, fetch: async (...args) => {
       requests.push(args);
-      return { status: 200, ok: true, json: async () => ({ ok: true, seconds: 2.660329 }), text: async () => 'Update Successful!' };
+      const setting = args[0] === '/settings' ? JSON.parse(args[1].body).call_linked_open : null;
+      return { status: 200, ok: true,
+        json: async () => setting === null ? ({ ok: true, seconds: 2.660329 })
+          : ({ ok: true, call_linked_open: setting, detail: setting ? '来电联动开门已开启，下次来电生效' : '来电联动开门已关闭' }),
+        text: async () => 'Update Successful!' };
     } }
   };
   context.fetch = (...args) => context.window.fetch(...args);
@@ -73,4 +77,33 @@ test('click response displays two decimals and makes exactly one mocked POST', a
   assert.equal(f.requests.length, 1);
   assert.equal(f.requests[0][0], '/door?from=web');
   assert.equal(f.requests[0][1].method, 'POST');
+});
+
+test('linked-open setting follows snapshots, SSE, and persists one explicit change', async () => {
+  const f = fixture(), toggle = f.element('linkedOpen');
+  f.handlers.onSnapshot({ call_linked_open: true });
+  assert.equal(toggle.checked, true);
+  f.handlers.events.settings({ call_linked_open: false });
+  assert.equal(toggle.checked, false);
+  toggle.checked = true;
+  await toggle.onchange({ target: toggle });
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, false);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0][0], '/settings');
+  assert.deepEqual(JSON.parse(f.requests[0][1].body), { call_linked_open: true });
+  assert.match(f.element('settingMsg').textContent, /下次来电生效/);
+});
+
+test('selected names and matched call source replace opaque identifiers', () => {
+  const f = fixture();
+  f.handlers.onSnapshot({ target: { selected: true, automatic_supported: true, household: '示例小区', door: '一号门' },
+    call: { ringing: true, caller: '+860000000', source: '一号门', matched: true } });
+  assert.equal(f.element('householdName').textContent, '示例小区');
+  assert.equal(f.element('doorName').textContent, '一号门');
+  assert.equal(f.element('call').textContent, '一号门来电中');
+  assert.doesNotMatch(f.element('call').textContent, /\+860000000/);
+  assert.match(f.element('linkedNote').textContent, /成功后结束来电/);
+  f.handlers.events.call({ ringing: false, ended_by: 'declined' });
+  assert.match(f.element('settingMsg').textContent, /已发送 603/);
 });
