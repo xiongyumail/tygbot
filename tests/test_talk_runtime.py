@@ -184,7 +184,7 @@ class TalkRuntime(unittest.TestCase):
             (temp / "test.c").write_text(HARNESS)
             binary = temp / "test"
             subprocess.run([
-                "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation",
+                "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-Wno-deprecated-declarations",  # 见 test.sh
                 "-g", "-fsanitize=address,undefined", "-I", str(temp), "-I", str(ROOT / "core"),
                 "-I", "/usr/include/cjson", str(temp / "talk.c"), str(temp / "test.c"),
                 str(ROOT / "core/core.c"), "-lcjson", "-lmbedcrypto", "-o", str(binary),
