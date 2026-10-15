@@ -204,6 +204,17 @@ ssize_t recv(int fd, void *out, size_t cap, int flags) {
   if (reads == 2) return reply(out, cap, BYE);
   if (reads == 3) { assert(!in_call && call_events == 2 && final_response_length == 0); tg_talk_request(); }
   break;
+ case 13:
+  /* A lost CANCEL: the call ends itself and the next INVITE is not answered 486. */
+  if (reads == 1) return reply(out, cap, "SIP/2.0 200 OK\r\nCSeq: 1 REGISTER\r\nContact: <sip:8001@198.51.100.9:40000>;expires=7200, <sip:8001@192.0.2.20:5070>;expires=3600\r\n\r\n");
+  if (reads == 2) return reply(out, cap, INVITE);
+  if (reads == 150) assert(in_call && registers == 1);
+  if (reads == 190) {
+   assert(!in_call && !strcmp(last_end, "timeout") && call_events == 2 && !last_sent("SIP/2.0 603") && registers == 1);
+   return reply(out, cap, INVITE2);
+  }
+  if (reads == 191) { assert(in_call && !strcmp(caller, "9002") && call_submissions == 2 && !last_sent("SIP/2.0 486")); tg_talk_request(); }
+  break;
  case 20: assert(sessions == 1 && fetches == 0 && saves == 0 && !strcmp(sip_state, "对讲注册中")); longjmp(stop, 1);
  case 21: assert(sessions == 1 && fetches == 1 && saves == 1 && !strcmp(cache_store.owner, tg_talk.account)); longjmp(stop, 1);
  }
@@ -232,6 +243,7 @@ int main(void) {
  reset(10); assert(store_config(&fixture, generation(), false)); assert(run_session(&fixture, false) == SIP_RESTART);
  reset(11); assert(store_config(&fixture, generation(), false)); assert(run_session(&fixture, false) == SIP_RESTART);
  reset(12); assert(store_config(&fixture, generation(), false)); assert(run_session(&fixture, false) == SIP_RESTART);
+ reset(13); assert(store_config(&fixture, generation(), false)); assert(run_session(&fixture, false) == SIP_RESTART);
  uint32_t stale = generation(); tg_talk_request(); assert(!store_config(&fixture, stale, false)); assert(!have_config);
  reset(20); cache_for(tg_talk.account); if (!setjmp(stop)) sip_task(NULL);
  reset(21); cache_for("13900000000"); if (!setjmp(stop)) sip_task(NULL);
@@ -239,7 +251,7 @@ int main(void) {
  reset(23); fetch_ok = false; if (!setjmp(stop)) sip_task(NULL);
  reset(24); fetch_ok = false; if (!setjmp(stop)) sip_task(NULL);
  tg_call_state state; tg_sip_state(&state); assert(state.stack_min_free == 4096);
- puts("SIP runtime passed: timeouts, digest, expires, proxy auth, rejection, ringing, cache, retry");
+ puts("SIP runtime passed: timeouts, digest, expires, proxy auth, rejection, ringing, ring cap, cache, retry");
  return 0;
 }
 '''

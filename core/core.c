@@ -254,7 +254,8 @@ bool tg_talk_config(const char *xml, int default_port, tg_sip_config *out, char 
     memset(out, 0, sizeof(*out));
     if (tg_xml_text(xml, "faultCode", fault, sizeof(fault)) && *fault && strcmp(fault, "0")) {
         char text[96] = ""; tg_xml_text(xml, "faultText", text, sizeof(text));
-        snprintf(detail, TG_DETAIL, "对讲配置被拒绝：%s %.80s", fault, text); return false;
+        /* Fits TG_DETAIL whole: a byte-limited %.Ns could split a UTF-8 character and break HA's API decode. */
+        snprintf(detail, TG_DETAIL, "对讲配置被拒绝：%s %s", fault, text); return false;
     }
     if (!tg_xml_text(xml, "SIP_ACCOUNT", out->account, sizeof(out->account)) || !*out->account
         || !tg_xml_text(xml, "SIP_PASSWORD", out->password, sizeof(out->password)) || !*out->password
@@ -361,12 +362,48 @@ bool tg_sip_user(const char *v, char *out, size_t cap) {
     if (!len || len >= cap || p[len] != '@') return false;
     memcpy(out, p, len); out[len] = 0; return true;
 }
-int tg_sip_expires(const char *m, int fallback) {
-    char value[256], number[16];
-    if (tg_sip_header(m, "Contact", value, sizeof(value)) && tg_sip_param(value, "expires", number, sizeof(number)) && *number) {
-        char *end; long n = strtol(number, &end, 10);
-        if (!*end && n >= 0 && n <= 86400) return (int)n;
+typedef struct { const char *contact; int mine, least; } expiry_scan;
+static bool names_contact(const char *entry, const char *contact) {
+    size_t n = strlen(contact);
+    for (const char *p = entry; (p = strstr(p, contact)); p++) if (p[n] == '>' || p[n] == ';' || !p[n]) return true;
+    return false;
+}
+/* A Contact header may carry several bindings, split at commas outside quotes and <>. */
+static bool scan_contacts(const char *v, size_t len, void *context) {
+    expiry_scan *s = context;
+    bool quoted = false; int angle = 0;
+    for (size_t i = 0, start = 0; i <= len; i++) {
+        char c = i < len ? v[i] : ',';
+        if (c == '"' && (!i || v[i - 1] != '\\')) quoted = !quoted;
+        else if (quoted) continue;
+        else if (c == '<') angle++;
+        else if (c == '>' && angle) angle--;
+        else if (c == ',' && !angle) {
+            char entry[256], number[16]; size_t n = i - start;
+            if (n < sizeof(entry)) {
+                memcpy(entry, v + start, n); entry[n] = 0;
+                long e = -1;
+                if (tg_sip_param(entry, "expires", number, sizeof(number)) && *number) {
+                    char *end; e = strtol(number, &end, 10);
+                    if (*end) e = -1;
+                }
+                if (e >= 0 && e <= 86400) {
+                    if (s->contact && names_contact(entry, s->contact)) s->mine = (int)e;
+                    if (s->least < 0 || e < s->least) s->least = (int)e;
+                }
+            }
+            start = i + 1;
+        }
     }
+    return true;
+}
+int tg_sip_expires(const char *m, const char *contact, int fallback) {
+    /* With a shared account the reply lists every binding; an unmatched one (rewritten by NAT) uses the shortest. */
+    expiry_scan s = {contact && *contact ? contact : NULL, -1, -1};
+    each_header(m, "Contact", scan_contacts, &s);
+    if (s.mine >= 0) return s.mine;
+    if (s.least >= 0) return s.least;
+    char number[16];
     if (tg_sip_header(m, "Expires", number, sizeof(number)) && *number) {
         char *end; long n = strtol(number, &end, 10);
         if (!*end && n >= 0 && n <= 86400) return (int)n;

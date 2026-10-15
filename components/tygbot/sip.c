@@ -27,6 +27,8 @@
 #define SIP_BACKOFF_MIN 60
 #define SIP_BACKOFF_MAX 1800
 #define SIP_TIMEOUTS_BEFORE_RESTART 3
+/* The platform cancels an unanswered call after about 61 s; a lost CANCEL must not keep it ringing. */
+#define SIP_RING_MAX_US 180000000LL
 #define NOINLINE __attribute__((noinline))
 
 static const char *const SIP_TAG = "tygbot.sip";
@@ -174,13 +176,14 @@ typedef struct {
     int fd;
     char local_ip[INET_ADDRSTRLEN];
     int local_port;
+    char contact[96];  /* Our binding as REGISTER sends it, to find its granted lifetime. */
     char call_id[64], from_tag[17];
     /* One unanswered INVITE transaction; final replies remain cached until ACK. */
     char invite_call[128], to_tag[17];
     unsigned cseq, invite_cseq;
     uint32_t invite_generation;
     int final_status;
-    int64_t final_until;
+    int64_t final_until, ring_until;
 } sip_ctx;
 typedef enum { SIP_RESTART, SIP_REJECTED } sip_end;
 
@@ -268,7 +271,7 @@ static NOINLINE bool respond(sip_ctx *c, const char *request, int status, const 
 }
 static void clear_invite(sip_ctx *c) {
     c->invite_call[0] = 0; c->to_tag[0] = 0; c->invite_cseq = 0; c->invite_generation = 0;
-    c->final_status = 0; c->final_until = 0; final_response_length = 0;
+    c->final_status = 0; c->final_until = c->ring_until = 0; final_response_length = 0;
 }
 static bool request_key(const char *buf, char *call, size_t capacity, unsigned *number) {
     char cseq[64];
@@ -315,7 +318,7 @@ static NOINLINE void handle_request(sip_ctx *c, const char *buf, const char *met
         if (!build_response(c, buf, 603, "Decline", true, invite_cseq, final_response, sizeof(final_response), &final_response_length)) {
             respond(c, buf, 500, "Server Internal Error", true, NULL); clear_invite(c); return;
         }
-        c->invite_generation = begin_call(who);
+        c->invite_generation = begin_call(who); c->ring_until = now + SIP_RING_MAX_US;
         respond(c, buf, 100, "Trying", false, NULL);
         respond(c, buf, 180, "Ringing", true, NULL);
     } else if (!strcmp(method, "CANCEL")) {
@@ -360,6 +363,7 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
     if (!ok) { close(c.fd); set_state(false, "SIP 连接失败"); return SIP_RESTART; }
     struct timeval tv = {.tv_usec = 250000}; setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     hex(c.call_id, 12); hex(c.from_tag, 8);
+    snprintf(c.contact, sizeof(c.contact), "sip:%s@%s:%d", cfg->account, c.local_ip, c.local_port);
 
     send_register(&c, cfg, NULL, 0);
     int64_t now = esp_timer_get_time();
@@ -394,7 +398,7 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
                     next_register = now + backoff * 1000000LL; backoff = backoff * 2 > SIP_BACKOFF_MAX ? SIP_BACKOFF_MAX : backoff * 2;
                 } else if (status < 300) {
                     authed = false; timeouts = 0; backoff = SIP_BACKOFF_MIN;
-                    int expires = tg_sip_expires(buf, SIP_EXPIRES);
+                    int expires = tg_sip_expires(buf, c.contact, SIP_EXPIRES);
                     if (expires > 0) {
                         int refresh = expires * 4 / 5 < 20 ? 20 : expires * 4 / 5;
                         set_state(true, "对讲已注册"); next_register = now + refresh * 1000000LL;
@@ -407,6 +411,8 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
         }
         apply_decline(&c, now);
         if (c.final_status && now >= c.final_until) clear_invite(&c);
+        /* Otherwise every later INVITE would get 486 until the session restarts. */
+        if (*c.invite_call && !c.final_status && now >= c.ring_until) { end_call(c.invite_generation, "timeout"); clear_invite(&c); }
         if (awaiting_register && now >= register_deadline) {
             awaiting_register = false; authed = false;
             /* Repeated silence usually means a changed address or route: rebuild the socket. */

@@ -98,10 +98,16 @@ int main(void) {
     CHECK(tg_sip_param("SIP/2.0/UDP 10.0.0.2;rport;branch=x", "rport", text, sizeof(text))); CHECK(!*text);
     CHECK(!tg_sip_param("SIP/2.0/UDP 10.0.0.2;xrport=1", "rport", text, sizeof(text)));
     CHECK(!tg_sip_user("<sip:no-host>", text, sizeof(text)));
-    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@192.0.2.20:5070>;expires=120\r\nExpires: 3600\r\n\r\n", 3600) == 120);
-    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 300\r\n\r\n", 3600) == 300);
-    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nm: <sip:8001@192.0.2.20>\r\n\r\n", 3600) == 3600);
-    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 9x\r\n\r\n", 3600) == 3600);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@192.0.2.20:5070>;expires=120\r\nExpires: 3600\r\n\r\n", NULL, 3600) == 120);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 300\r\n\r\n", NULL, 3600) == 300);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nm: <sip:8001@192.0.2.20>\r\n\r\n", NULL, 3600) == 3600);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nExpires: 9x\r\n\r\n", NULL, 3600) == 3600);
+    /* Shared account: other clients' bindings are listed too, in one header or several. */
+    const char *ours = "sip:8001@192.0.2.20:5070";
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@192.0.2.30:5060>;expires=7200, <sip:8001@192.0.2.20:5070>;expires=900\r\n\r\n", ours, 3600) == 900);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@192.0.2.30:5060>;expires=300\r\nm: <sip:8001@192.0.2.20:5070>;expires=900\r\n\r\n", ours, 3600) == 900);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: \"Door, A\" <sip:8001@192.0.2.30:5060>;expires=300, <sip:8001@192.0.2.20:50701>;expires=900\r\n\r\n", ours, 3600) == 300);
+    CHECK(tg_sip_expires("SIP/2.0 200 OK\r\nContact: <sip:8001@198.51.100.9:40000>;expires=600, <sip:8001@192.0.2.30:5060>;expires=7200\r\nExpires: 60\r\n\r\n", ours, 3600) == 600);
     /* RFC 2617 section 3.5 example. */
     tg_sip_digest("Mufasa", "testrealm@host.com", "Circle Of Life", "GET", "/dir/index.html", "dcd98b7102dd2f0e8b11d0f600bfb0c093", "auth", "00000001", "0a4f113b", md5);
     CHECK(!strcmp(md5, "6629fae49393a05397450978507c4ef1"));

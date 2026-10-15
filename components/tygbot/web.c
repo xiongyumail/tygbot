@@ -353,6 +353,12 @@ static uint32_t ringing_call(char *caller, size_t capacity) {
 static uint32_t ringing_generation(void) { return ringing_call(NULL, 0); }
 bool tg_submit_call_open(uint32_t generation, const char *caller) {
     if (!call_jobs || !generation || !caller || !*caller || !tg_call_linked_open_get()) return false;
+    /* A call from another door is shown as such, not recorded as a failed opening. Before the
+     * first refresh the target is unknown, so the worker's own match check decides. */
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    bool other_door = target.door_selected && strcmp(caller, target.door_code);
+    xSemaphoreGive(tg_state_lock);
+    if (other_door) return false;
     call_job pending = {.generation = generation, .submitted = esp_timer_get_time()};
     if (!tg_copy(pending.caller, sizeof(pending.caller), caller)) return false;
     return xQueueOverwrite(call_jobs, &pending) == pdTRUE;

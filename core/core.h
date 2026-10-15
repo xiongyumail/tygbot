@@ -89,7 +89,8 @@ bool tg_sip_header(const char *message, const char *name, char *out, size_t capa
 bool tg_sip_headers(const char *message, const char *name, char *out, size_t capacity);
 bool tg_sip_param(const char *value, const char *name, char *out, size_t capacity);
 bool tg_sip_user(const char *value, char *out, size_t capacity);
-/* Registration lifetime granted in a 200 OK: Contact ;expires= first, then Expires; else `fallback`. */
-int tg_sip_expires(const char *message, int fallback);
+/* Registration lifetime granted in a 200 OK: the `contact` binding's ;expires=, else the shortest
+ * listed binding, then Expires; else `fallback`. */
+int tg_sip_expires(const char *message, const char *contact, int fallback);
 void tg_sip_digest(const char *user, const char *realm, const char *password, const char *method, const char *uri,
                    const char *nonce, const char *qop, const char *nc, const char *cnonce, char out[33]);

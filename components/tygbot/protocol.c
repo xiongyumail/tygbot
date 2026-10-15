@@ -516,7 +516,8 @@ bool tg_target_set(const char *organization, const char *household, const char *
     if (!door_unique) { error(detail, "所选门禁不唯一或已失效"); invalidate(); return false; }
     bool changed = strcmp(tg_cfg.organization, candidate.organization) || strcmp(tg_cfg.household, candidate.household)
         || strcmp(tg_cfg.door_code, candidate.door_code) || strcmp(tg_cfg.door_number, candidate.door_number);
-    if (changed && tg_call_linked_open_get() && !tg_call_linked_open_set(false)) {
+    bool was_linked = tg_call_linked_open_get();
+    if (changed && was_linked && !tg_call_linked_open_set(false)) {
         error(detail, "门禁已验证，但自动模式关闭设置保存失败"); invalidate(); return false;
     }
     tg_config previous = tg_cfg;
@@ -528,5 +529,5 @@ bool tg_target_set(const char *organization, const char *household, const char *
         tg_cfg = previous; invalidate(); door_cache_clear(); error(detail, "门禁选择保存失败"); return false;
     }
     tg_target_note(&room, &door, true, door_caller_unique);
-    error(detail, changed ? "当前门禁已更新，来电联动开门已关闭" : "当前门禁已确认"); return true;
+    error(detail, !changed ? "当前门禁已确认" : was_linked ? "当前门禁已更新，来电联动开门已关闭" : "当前门禁已更新"); return true;
 }
