@@ -56,7 +56,8 @@ typedef struct {
 /* Selected authorization context. Identifiers stay internal; labels are used by the UI and HA. */
 typedef struct {
     bool door_selected, caller_unique;
-    char household_name[96], door_name[192], door_code[128];
+    /* door_name holds "group · name" whole (95 + 5 + 95 bytes): a cut could split a UTF-8 character. */
+    char household_name[96], door_name[200], door_code[128];
 } tg_target_state;
 
 const char *tg_string(const cJSON *value, const char *key);
