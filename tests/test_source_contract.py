@@ -240,6 +240,17 @@ class SourceContract(unittest.TestCase):
         self.assertIn('if (!strcmp(path, "/settings"))', web)
         self.assertIn('cJSON_AddBoolToObject(v, "call_linked_open"', web)
 
+    def test_short_call_and_busy_states_are_not_lost_between_ha_samples(self):
+        sip = (ROOT / "core/sip.c").read_text()
+        web = (ROOT / "core/web.c").read_text()
+        adapter = (COMPONENT / "tygbot.cpp").read_text()
+        self.assertIn("out->sequence = call_sequence", sip)
+        self.assertNotIn("decline_generation = 0; caller[0] = 0", sip)
+        self.assertIn("busy_sequence", web)
+        self.assertIn("call_hold_until_ = now + 3000", adapter)
+        self.assertIn("busy_hold_until_ = now + 1000", adapter)
+        self.assertIn("sync_transient_state_();", adapter)
+
     def test_call_linked_open_user_words(self):
         page = (ROOT / "core/index.html").read_text()
         package = PACKAGE.read_text()

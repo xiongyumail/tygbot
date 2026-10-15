@@ -47,11 +47,14 @@ class TYGBot : public PollingComponent {
   void set_auth_required(bool value) { auth_required_ = value; }
   void set_host(const std::string &v) { host_ = v; }
  protected:
+  void sync_transient_state_();
   WebHandler web_handler_;
   bool started_{false}, ready_{false}, logged_in_{false}, busy_{false}, auth_required_{true}, portal_active_{false};
   std::string salt_, hash_, host_;
   std::string status_{"等待网络和校时"}, last_result_{"尚未开门"};
   bool call_ringing_{false}, call_registered_{false}, sip_started_{false};
+  uint32_t runtime_sync_at_{0}, call_sequence_{0}, call_hold_until_{0};
+  uint32_t busy_sequence_{0}, busy_hold_until_{0};
   std::string caller_, caller_id_, call_status_{"未启用"}, household_name_, door_name_;
 };
 }  // namespace esphome::tygbot

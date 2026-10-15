@@ -159,7 +159,9 @@ ssize_t recv(int fd, void *out, size_t cap, int flags) {
   if (reads == 4) {
    const char *terminated = last_sent("SIP/2.0 487"); char final_tag[17]; assert(terminated && strstr(terminated, "\r\nCSeq: 1 INVITE\r\n"));
    to_tag(terminated, final_tag); assert(!strcmp(tag, final_tag)); assert(strstr(last_sent("SIP/2.0 200"), "\r\nCSeq: 1 CANCEL\r\n"));
-   assert(!in_call); tg_talk_request();
+   tg_call_state state; tg_sip_state(&state);
+   assert(!state.ringing && state.sequence == 1 && !state.generation && !strcmp(state.caller, "9001"));
+   tg_talk_request();
   }
   break;
  case 9:

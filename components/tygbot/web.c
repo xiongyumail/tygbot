@@ -35,6 +35,7 @@ static char boot[9], last_door[TG_EVENT_SIZE], last_door_detail[TG_DETAIL], last
 static int login = -1;
 static time_t login_at;
 static bool busy;
+static uint32_t busy_sequence;
 static char warm_detail[TG_DETAIL], warm_at[24];
 static bool warm_ok;
 static int64_t manual_until;
@@ -81,7 +82,7 @@ void tg_login_note(int state, bool relogin) {
 }
 void tg_door_status_get(tg_door_status *out) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
-    out->busy = busy; out->login = login;
+    out->busy = busy; out->busy_sequence = busy_sequence; out->login = login;
     out->has_door = *last_door_detail != 0;
     tg_copy(out->door_detail, sizeof(out->door_detail), last_door_detail); tg_copy(out->door_at, sizeof(out->door_at), last_door_at);
     out->has_warm = *warm_at != 0; tg_copy(out->warm_detail, sizeof(out->warm_detail), warm_detail);
@@ -118,7 +119,12 @@ void tg_target_note(const tg_room *selected_room, const tg_door *selected_door, 
     xSemaphoreGive(tg_state_lock);
     if (changed) { cJSON *v = target_json(&next); tg_event("target", v); cJSON_Delete(v); }
 }
-void tg_set_busy(bool value) { xSemaphoreTake(tg_state_lock, portMAX_DELAY); busy = value; xSemaphoreGive(tg_state_lock); }
+void tg_set_busy(bool value) {
+    xSemaphoreTake(tg_state_lock, portMAX_DELAY);
+    if (value && !busy && ++busy_sequence == 0) busy_sequence = 1;
+    busy = value;
+    xSemaphoreGive(tg_state_lock);
+}
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source) {
     cJSON *v = cJSON_CreateObject(); char at[24]; tg_timestamp(at, sizeof(at), false);
     cJSON_AddBoolToObject(v, "ok", ok); cJSON_AddStringToObject(v, "detail", detail);

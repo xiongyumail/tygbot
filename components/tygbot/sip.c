@@ -78,7 +78,8 @@ static void end_call(uint32_t generation, const char *ended_by) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
     bool changed = in_call && (!generation || generation == active_generation);
     if (changed) {
-        in_call = false; active_generation = 0; decline_generation = 0; caller[0] = 0;
+        /* Retain the last caller and sequence for HA after a short call has ended. */
+        in_call = false; active_generation = 0; decline_generation = 0;
         tg_copy(last_end, sizeof(last_end), ended_by ? ended_by : "");
     }
     xSemaphoreGive(tg_state_lock);
@@ -100,7 +101,7 @@ void tg_sip_state(tg_call_state *out) {
     out->registered = registered; out->ringing = in_call;
     tg_copy(out->caller, sizeof(out->caller), caller); tg_copy(out->detail, sizeof(out->detail), sip_state);
     tg_copy(out->ended_by, sizeof(out->ended_by), last_end);
-    out->generation = in_call ? active_generation : 0; out->stack_min_free = stack_min_free;
+    out->sequence = call_sequence; out->generation = in_call ? active_generation : 0; out->stack_min_free = stack_min_free;
     xSemaphoreGive(tg_state_lock);
 }
 bool tg_sip_call_matches(uint32_t generation, const char *who) {

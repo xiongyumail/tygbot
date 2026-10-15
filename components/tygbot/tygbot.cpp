@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "tygbot.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include "esphome/components/network/util.h"
 #ifdef USE_CAPTIVE_PORTAL
 #include "esphome/components/captive_portal/captive_portal.h"
@@ -150,7 +151,11 @@ void TYGBot::loop() {
     tg_web_set_captive_portal(active, ap_ip);
   }
 #endif
-  if (started_ || (!network::is_connected() && !portal_active_)) return;
+  if (started_) {
+    if (ready_) sync_transient_state_();
+    return;
+  }
+  if (!network::is_connected() && !portal_active_) return;
   started_ = true;
   esp_fill_random(tg_cfg.cookie_key, sizeof(tg_cfg.cookie_key));
   if (!*tg_cfg.device_id) {
@@ -172,11 +177,43 @@ void TYGBot::loop() {
   sip_started_ = true;
   ESP_LOGI(TAG, "Web service ready on port %d", TG_HTTP_PORT);
 }
-void TYGBot::update() {
-  if (!ready_) return;
+void TYGBot::sync_transient_state_() {
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - runtime_sync_at_) < 0) return;
+  runtime_sync_at_ = now + 50;
+
   tg_door_status door;
   tg_door_status_get(&door);
-  busy_ = door.busy;
+  if (door.busy_sequence != busy_sequence_) {
+    busy_sequence_ = door.busy_sequence;
+    if (busy_sequence_ != 0) busy_hold_until_ = now + 1000;
+  }
+  busy_ = door.busy || (busy_hold_until_ != 0 && static_cast<int32_t>(busy_hold_until_ - now) > 0);
+
+  if (!sip_started_) return;
+  tg_call_state call;
+  tg_sip_state(&call);
+  call_registered_ = call.registered;
+  if (call.sequence != call_sequence_) {
+    call_sequence_ = call.sequence;
+    if (call_sequence_ != 0) {
+      call_hold_until_ = now + 3000;
+      caller_id_ = call.caller;
+      tg_target_state target;
+      tg_target_state_get(&target);
+      char source[sizeof(target.door_name)];
+      tg_call_source(&target, call.caller, source, sizeof(source));
+      caller_ = source;
+    }
+  }
+  call_ringing_ = call.ringing ||
+      (call_hold_until_ != 0 && static_cast<int32_t>(call_hold_until_ - now) > 0);
+}
+void TYGBot::update() {
+  if (!ready_) return;
+  sync_transient_state_();
+  tg_door_status door;
+  tg_door_status_get(&door);
   logged_in_ = door.login == 1;
   if (door.has_door) {
     last_result_ = door.door_detail;
@@ -189,7 +226,7 @@ void TYGBot::update() {
     tg_target_state target;
     tg_sip_state(&call);
     tg_target_state_get(&target);
-    call_registered_ = call.registered; call_ringing_ = call.ringing;
+    call_registered_ = call.registered;
     caller_id_ = call.caller;
     char source[sizeof(target.door_name)];
     tg_call_source(&target, call.caller, source, sizeof(source));

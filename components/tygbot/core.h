@@ -48,6 +48,8 @@ typedef struct {
 typedef struct {
     bool registered, ringing;
     char caller[64], detail[TG_DETAIL], ended_by[16];
+    /* Monotonic per boot and retained after the call ends, so a fast call is still observable. */
+    uint32_t sequence;
     uint32_t generation;
     uint32_t stack_min_free;
 } tg_call_state;

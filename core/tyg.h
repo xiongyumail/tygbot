@@ -28,6 +28,8 @@ void tg_set_busy(bool busy);
 /* Door state for the HA entities, read under one lock without building JSON. */
 typedef struct {
     bool busy, has_door, has_warm;
+    /* Increments when an open attempt starts, even if it finishes between HA samples. */
+    uint32_t busy_sequence;
     int login; /* -1 unknown, 0 logged out, 1 logged in */
     char door_detail[TG_DETAIL], door_at[24], warm_detail[TG_DETAIL];
 } tg_door_status;
