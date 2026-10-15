@@ -4,7 +4,7 @@ substitutions:
   device_friendly_name: TYGBot
 
 packages:
-  tygbot: github://xiongyumail/tygbot/packages/tygbot.yaml@v1.2.1
+  tygbot: github://xiongyumail/tygbot/packages/tygbot.yaml@v1.2.2
 
 api:
   encryption:

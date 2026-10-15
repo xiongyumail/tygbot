@@ -27,7 +27,7 @@ extern const unsigned char setup_start[] asm("_binary_setup_html_start");
 extern const unsigned char setup_end[] asm("_binary_setup_html_end");
 /* Measured peak about 3.4 KB (snapshot JSON); 3 KB once overflowed. */
 #define TG_SSE_STACK_BYTES 6144
-#define TG_WEB_VERSION "1.2.1"
+#define TG_WEB_VERSION "1.2.2"
 typedef struct { uint32_t sequence; char kind[16], data[TG_EVENT_SIZE]; } event_record;
 static event_record history[TG_EVENT_COUNT];
 static uint32_t sequence;
