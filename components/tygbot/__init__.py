@@ -49,7 +49,7 @@ def validate_framework(config):
         raise cv.Invalid("password is required unless require_auth is false")
     if not ESPHOME_VERSION.startswith(TESTED_ESPHOME):
         _LOGGER.warning("TYGBot is tested with ESPHome %sx; found %s", TESTED_ESPHOME, ESPHOME_VERSION)
-    # HA shows the project version as the firmware: append the built commit, e.g. 1.2.0+a1b2c.
+    # HA shows the project version as the firmware: append the built commit, e.g. 1.2.1+a1b2c.
     project = fv.full_config.get().get("esphome", {}).get("project")
     commit = build_commit()
     if commit and project and "+" not in project["version"]:

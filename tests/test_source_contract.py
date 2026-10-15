@@ -137,8 +137,8 @@ class SourceContract(unittest.TestCase):
     def test_remote_package_and_component_are_version_pinned(self):
         example = (ROOT / "tygbot.example.yaml").read_text()
         package = PACKAGE.read_text()
-        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.2.0", example)
-        self.assertIn("repository_ref: v1.2.0", package)
+        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.2.1", example)
+        self.assertIn("repository_ref: v1.2.1", package)
         self.assertIn("ref: ${repository_ref}", package)
         self.assertNotIn("type: local", package)
         self.assertIn("refresh: always", package)

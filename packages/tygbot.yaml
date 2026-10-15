@@ -1,14 +1,14 @@
 substitutions:
   device_name: tygbot
   device_friendly_name: TYGBot
-  repository_ref: v1.2.0
+  repository_ref: v1.2.1
 
 esphome:
   name: ${device_name}
   friendly_name: ${device_friendly_name}
   project:
     name: xiongyu.tygbot
-    version: "1.2.0"
+    version: "1.2.1"
   compile_process_limit: 2
 
 esp32:
