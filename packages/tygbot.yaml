@@ -123,7 +123,11 @@ switch:
     name: Call Linked Open 来电联动开门
     icon: mdi:door-open
     entity_category: config
-    lambda: return id(tygbot_core).call_linked_open_enabled();
+    # The setting lives in the device; never write a restored or default state back at boot.
+    restore_mode: DISABLED
+    lambda: |-
+      if (!id(tygbot_core).ready()) return {};
+      return id(tygbot_core).call_linked_open_enabled();
     turn_on_action:
       - lambda: id(tygbot_core).set_call_linked_open(true);
     turn_off_action:
@@ -138,7 +142,10 @@ binary_sensor:
   - platform: template
     name: Logged In 账号登录
     icon: mdi:account-check
-    lambda: return id(tygbot_core).logged_in();
+    # No state until the first check: a reboot must not look like logout then login.
+    lambda: |-
+      if (!id(tygbot_core).login_known()) return {};
+      return id(tygbot_core).logged_in();
   - platform: template
     name: Door Busy 开门处理中
     icon: mdi:progress-clock

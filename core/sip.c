@@ -26,6 +26,9 @@
 #define SIP_BACKOFF_MIN 60
 #define SIP_BACKOFF_MAX 1800
 #define SIP_TIMEOUTS_BEFORE_RESTART 3
+/* The platform occasionally leaves one refresh unanswered while the next succeeds: retry soon
+ * rather than after the 60 s backoff, during which the call service shows offline. */
+#define SIP_TIMEOUT_RETRY_US 5000000LL
 /* The platform cancels an unanswered call after about 61 s; a lost CANCEL must not keep it ringing. */
 #define SIP_RING_MAX_US 180000000LL
 #define NOINLINE __attribute__((noinline))
@@ -42,7 +45,8 @@ static SemaphoreHandle_t config_lock;
 static bool registered, in_call;
 static char caller[64], sip_state[TG_DETAIL] = "未启动", last_end[16];
 static uint32_t call_sequence, active_generation, decline_generation;
-static uint32_t stack_min_free = UINT32_MAX;
+static uint32_t stack_min_free = UINT32_MAX, register_timeouts;
+static int granted_expires;
 /* Prepared from the ringing INVITE, so a later decline allocates neither heap nor SIP stack. */
 static char final_response[SIP_TX];
 static size_t final_response_length;
@@ -103,6 +107,7 @@ void tg_sip_state(tg_call_state *out) {
     tg_copy(out->caller, sizeof(out->caller), caller); tg_copy(out->detail, sizeof(out->detail), sip_state);
     tg_copy(out->ended_by, sizeof(out->ended_by), last_end);
     out->sequence = call_sequence; out->generation = in_call ? active_generation : 0; out->stack_min_free = stack_min_free;
+    out->register_timeouts = register_timeouts; out->expires = granted_expires;
     xSemaphoreGive(tg_state_lock);
 }
 bool tg_sip_call_matches(uint32_t generation, const char *who) {
@@ -400,6 +405,7 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
                     int expires = tg_sip_expires(buf, c.contact, SIP_EXPIRES);
                     if (expires > 0) {
                         int refresh = expires * 4 / 5 < 20 ? 20 : expires * 4 / 5;
+                        xSemaphoreTake(tg_state_lock, portMAX_DELAY); granted_expires = expires; xSemaphoreGive(tg_state_lock);
                         set_state(true, "对讲已注册"); next_register = now + refresh * 1000000LL;
                     } else { set_state(false, "SIP 服务器未授予注册期限"); next_register = now + backoff * 1000000LL; }
                 } else {
@@ -415,8 +421,10 @@ static NOINLINE sip_end run_session(const tg_sip_config *cfg, bool cached) {
         if (awaiting_register && now >= register_deadline) {
             awaiting_register = false; authed = false;
             /* Repeated silence usually means a changed address or route: rebuild the socket. */
+            xSemaphoreTake(tg_state_lock, portMAX_DELAY); register_timeouts++; xSemaphoreGive(tg_state_lock);
             if (++timeouts >= SIP_TIMEOUTS_BEFORE_RESTART) { close(c.fd); set_state(false, "SIP 注册连续超时，重建连接"); return SIP_RESTART; }
             set_state(false, "SIP 注册超时，未收到服务器响应");
+            if (now + SIP_TIMEOUT_RETRY_US < next_register) next_register = now + SIP_TIMEOUT_RETRY_US;
         }
         if (now >= next_register) {
             authed = false; send_register(&c, cfg, NULL, 0); awaiting_register = true;

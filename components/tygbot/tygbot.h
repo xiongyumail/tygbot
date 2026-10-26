@@ -32,6 +32,8 @@ class TYGBot : public PollingComponent {
   // Re-fetch the door-station call (SIP) config, e.g. after moving house.
   void refresh_call();
   bool ready() const { return ready_; }
+  // False until the first login check, so a reboot is not reported as a logout.
+  bool login_known() const { return login_known_; }
   bool logged_in() const { return logged_in_; }
   bool busy() const { return busy_; }
   const std::string &last_result() const { return last_result_; }
@@ -49,7 +51,7 @@ class TYGBot : public PollingComponent {
  protected:
   void sync_transient_state_();
   WebHandler web_handler_;
-  bool started_{false}, ready_{false}, logged_in_{false}, busy_{false}, auth_required_{true}, portal_active_{false};
+  bool started_{false}, ready_{false}, login_known_{false}, logged_in_{false}, busy_{false}, auth_required_{true}, portal_active_{false};
   std::string salt_, hash_, host_;
   std::string status_{"等待网络和校时"}, last_result_{"尚未开门"};
   bool call_ringing_{false}, call_registered_{false}, sip_started_{false};

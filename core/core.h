@@ -48,6 +48,8 @@ typedef struct {
     uint32_t sequence;
     uint32_t generation;
     uint32_t stack_min_free;
+    uint32_t register_timeouts;
+    int expires; /* last granted registration period, s */
 } tg_call_state;
 /* Selected authorization context. Identifiers stay internal; labels are used by the UI and HA. */
 typedef struct {
@@ -74,6 +76,15 @@ bool tg_parse_doors(const cJSON *value, tg_door *doors, size_t *count, char *det
 bool tg_select_door(const tg_config *config, const tg_door *doors, size_t count, size_t *index);
 /* Caller identifiers are safe for automation only for one household and one matching door code. */
 bool tg_caller_target_unique(size_t household_count, const tg_door *doors, size_t count, size_t selected);
+/* The door WSS stays open; a households query re-verifies login (and renews the door token) this often. */
+#define TG_LOGIN_CHECK_US (6LL * 3600 * 1000000)
+/* PINGs go out every 15 s; no frame for this long means the connection is not trusted for an open. */
+#define TG_WS_FRESH_US 25000000LL
+/* Free heap a background TLS handshake needs, so it never starves Wi-Fi, BLE or the API. */
+#define TG_TLS_HEAP_MIN 49152
+#define TG_TLS_BLOCK_MIN 24576
+typedef enum { TG_DOOR_KEEP, TG_DOOR_RECONNECT, TG_DOOR_VERIFY } tg_door_step;
+tg_door_step tg_door_next_step(bool target, bool live, int64_t since_verified_us);
 
 void tg_md5_hex(const char *text, char out[33]);
 /* Login replies carry the account password Base64-encoded; only its MD5 is kept. */

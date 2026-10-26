@@ -27,11 +27,11 @@ cJSON *tg_snapshot(void);
 void tg_set_busy(bool busy);
 /* Door state for the HA entities, read under one lock without building JSON. */
 typedef struct {
-    bool busy, has_door, has_warm;
+    bool busy, has_door, has_check;
     /* Increments when an open attempt starts, even if it finishes between HA samples. */
     uint32_t busy_sequence;
     int login; /* -1 unknown, 0 logged out, 1 logged in */
-    char door_detail[TG_DETAIL], door_at[24], warm_detail[TG_DETAIL];
+    char door_detail[TG_DETAIL], door_at[24], check_detail[TG_DETAIL];
 } tg_door_status;
 void tg_door_status_get(tg_door_status *out);
 void tg_door_note(bool ok, const char *detail, double seconds, double reply_wait, const char *source);
@@ -59,6 +59,9 @@ bool tg_sip_decline(uint32_t generation);
 /* 服务发现等前置条件变化时提前重试拉取，不作废配置。 */
 void tg_sip_kick(void);
 bool tg_refresh(bool force, char *detail);
+/* Periodic door check; *network tells whether it used the network beyond the kept connection. */
+bool tg_door_check(char *detail, bool *network);
+void tg_door_diagnostics(cJSON *v);
 bool tg_open(bool dry, char *detail, double *reply_wait);
 /* Automatic opening is allowed only when the INVITE user equals the selected door code. */
 bool tg_open_call(const char *caller, uint32_t generation, char *detail, double *reply_wait);

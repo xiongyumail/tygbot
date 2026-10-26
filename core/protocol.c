@@ -12,6 +12,7 @@
 #include "esp_websocket_client.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "mbedtls/md5.h"
 #include "mbedtls/base64.h"
 
@@ -30,7 +31,13 @@ static tg_room room;
 static tg_door door;
 static size_t door_count;
 static bool door_unique, door_caller_unique;
-static int64_t refreshed, discovered;
+static int64_t discovered, verified, token_at, ws_at;
+static volatile int64_t ws_rx_at;
+/* The worker reads these; the WSS task only marks a drop it did not cause. */
+static volatile bool ws_live, ws_closing;
+static volatile uint32_t ws_drops;
+static uint32_t ws_reconnects;
+static size_t room_households;
 /* Compact, sanitized selection lists from the latest successful refresh. Keep only
  * one household's doors to bound heap use on the ESP32-C3. */
 static char *households_cache, *doors_cache;
@@ -60,12 +67,14 @@ static cJSON *cache_array(const char *text) {
     return value;
 }
 static void ws_close(void) {
+    ws_closing = true;
     if (ws) { esp_websocket_client_stop(ws); esp_websocket_client_destroy(ws); ws = NULL; }
+    ws_live = ws_closing = false;
     xEventGroupClearBits(events, WS_UP | WS_DONE | WS_FAIL);
 }
 static void invalidate(void) {
     memset(&room, 0, sizeof(room)); memset(&door, 0, sizeof(door));
-    door_count = 0; door_unique = door_caller_unique = false; refreshed = 0; ws_close();
+    door_count = 0; door_unique = door_caller_unique = false; verified = 0; ws_close();
 }
 /* Keep the stored session: the next check re-validates it, so a misread reply costs no SMS login. */
 static void session_rejected(void) {
@@ -73,8 +82,11 @@ static void session_rejected(void) {
 }
 /* The worker owns protocol operations. Callback never stops/destroys its own client. */
 static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    /* Any frame, PONG included, shows the connection still carries data. */
+    if (id == WEBSOCKET_EVENT_CONNECTED || id == WEBSOCKET_EVENT_DATA) ws_rx_at = esp_timer_get_time();
     if (id == WEBSOCKET_EVENT_CONNECTED) { xEventGroupSetBits(events, WS_UP); return; }
     if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_ERROR || id == WEBSOCKET_EVENT_CLOSED) {
+        if (ws_live && !ws_closing) { ws_live = false; ws_drops++; }
         xEventGroupClearBits(events, WS_UP); xEventGroupSetBits(events, WS_FAIL); return;
     }
     if (id != WEBSOCKET_EVENT_DATA) return;
@@ -301,39 +313,35 @@ static void cache_doors(const tg_room *selected_room, const cJSON *list) {
     tg_copy(doors_organization, sizeof(doors_organization), selected_room->organization);
     tg_copy(doors_household, sizeof(doors_household), selected_room->household);
 }
-/* `list`, when given, receives every offered door for the web page. */
-static bool refresh(const tg_config *selection, bool force, bool publish, char *detail, cJSON **list) {
-    if (selection == &tg_cfg && !force && door_count && esp_timer_get_time() - refreshed < 240000000LL
-        && ws && esp_websocket_client_is_connected(ws)) return true;
-    invalidate();
-    cJSON *v = query_households(detail);
-    if (!v) return false;
-    size_t household_count = cache_households(v);
-    bool ok = tg_select_room(v, selection, &room, detail); cJSON_Delete(v);
-    if (!ok) return false;
-    /* Returned door token is hex-like; refuse reserved characters rather than putting them in a URL. */
-    for (const char *p = room.token; *p; p++) if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') { error(detail, "门禁 token 格式错误"); invalidate(); return false; }
+static bool ws_fresh(void) {
+    return ws && esp_websocket_client_is_connected(ws) && esp_timer_get_time() - ws_rx_at < TG_WS_FRESH_US;
+}
+/* Opens the door WSS with the current room token and loads its doors. */
+static bool connect_doors(const tg_config *selection, bool publish, char *detail, cJSON **list) {
+    ws_close();
     char url[768]; size_t n = strlen(vdcs);
     snprintf(url, sizeof(url), "wss://%.*s%swsserver/websocket?token=%s", (int)(n - 8), vdcs + 8, n && vdcs[n-1] == '/' ? "" : "/", room.token);
     if (!tg_url_allowed(url, false, true)) { error(detail, "门禁地址验证失败"); invalidate(); return false; }
+    /* The connection is kept for hours: a missing PONG for 45 s marks it dead before an open relies on it. */
     esp_websocket_client_config_t cfg = {.uri = url, .crt_bundle_attach = esp_crt_bundle_attach, .disable_auto_reconnect = true,
-        .buffer_size = 1024, .task_stack = 4096, .network_timeout_ms = 15000, .ping_interval_sec = 15};
+        .buffer_size = 1024, .task_stack = 4096, .network_timeout_ms = 15000, .ping_interval_sec = 15, .pingpong_timeout_sec = 45};
     ws = esp_websocket_client_init(&cfg);
     if (!ws) { error(detail, "WSS 内存不足"); invalidate(); return false; }
     esp_websocket_register_events(ws, WEBSOCKET_EVENT_ANY, ws_event, NULL);
     if (esp_websocket_client_start(ws) != ESP_OK || !(xEventGroupWaitBits(events, WS_UP | WS_FAIL, false, false, pdMS_TO_TICKS(16000)) & WS_UP)) {
         error(detail, "门禁 WSS 连接失败"); invalidate(); return false;
     }
+    ws_at = esp_timer_get_time(); ws_live = true;
     cJSON *body = cJSON_CreateObject(); cJSON_AddStringToObject(body, "mobile", room.mobile); cJSON_AddStringToObject(body, "organizationSeq", room.organization);
-    v = exchange("MobileDownloadConfig", body, detail, NULL);
+    cJSON *v = exchange("MobileDownloadConfig", body, detail, NULL);
     tg_door *doors = v ? calloc(TG_MAX_DOORS, sizeof(tg_door)) : NULL;
     if (v && !doors) error(detail, "门禁列表内存不足");
-    ok = doors && tg_parse_doors(v, doors, &door_count, detail); cJSON_Delete(v);
+    bool ok = doors && tg_parse_doors(v, doors, &door_count, detail); cJSON_Delete(v);
     if (ok) {
         size_t selected = 0;
         door_unique = tg_select_door(selection, doors, door_count, &selected);
         if (door_unique) door = doors[selected];
-        door_caller_unique = door_unique && tg_caller_target_unique(household_count, doors, door_count, selected);
+        door_caller_unique = door_unique && tg_caller_target_unique(room_households, doors, door_count, selected);
         cJSON *available = doors_json(doors, door_count);
         if (available) cache_doors(&room, available);
         if (list) {
@@ -347,9 +355,51 @@ static bool refresh(const tg_config *selection, bool force, bool publish, char *
     }
     free(doors);
     if (!ok) { invalidate(); return false; }
-    refreshed = esp_timer_get_time(); tg_login_note(1, false); error(detail, "登录和门禁连接正常"); return true;
+    error(detail, "登录和门禁连接正常"); return true;
+}
+/* `list`, when given, receives every offered door for the web page. Without force a live
+ * connection is reused, and a dropped or silent one is reopened with the kept door token;
+ * the households query (which issues a new token) runs only when that fails. */
+static bool refresh(const tg_config *selection, bool force, bool publish, char *detail, cJSON **list) {
+    bool kept = selection == &tg_cfg && !force && !list && door_count && *room.token;
+    if (kept && ws_fresh()) return true;
+    if (kept) {
+        ws_reconnects++;
+        if (connect_doors(selection, publish, detail, NULL)) return true;
+    }
+    invalidate();
+    cJSON *v = query_households(detail);
+    if (!v) return false;
+    room_households = cache_households(v);
+    bool ok = tg_select_room(v, selection, &room, detail); cJSON_Delete(v);
+    if (!ok) return false;
+    /* Returned door token is hex-like; refuse reserved characters rather than putting them in a URL. */
+    for (const char *p = room.token; *p; p++) if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') { error(detail, "门禁 token 格式错误"); invalidate(); return false; }
+    token_at = esp_timer_get_time();
+    if (!connect_doors(selection, publish, detail, list)) return false;
+    verified = esp_timer_get_time(); tg_login_note(1, false); return true;
 }
 bool tg_refresh(bool force, char *detail) { return refresh(&tg_cfg, force, true, detail, NULL); }
+bool tg_door_check(char *detail, bool *network) {
+    tg_door_step next = tg_door_next_step(door_count && *room.token, ws_fresh(), verified ? esp_timer_get_time() - verified : -1);
+    *network = next != TG_DOOR_KEEP;
+    if (next == TG_DOOR_KEEP) return true;
+    /* Unlike an open, a background reconnect waits for memory; the old connection is released first. */
+    ws_close();
+    if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < TG_TLS_HEAP_MIN || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < TG_TLS_BLOCK_MIN) {
+        error(detail, "可用内存不足，稍后连接门禁"); return false;
+    }
+    return refresh(&tg_cfg, next == TG_DOOR_VERIFY, true, detail, NULL);
+}
+void tg_door_diagnostics(cJSON *v) {
+    int64_t now = esp_timer_get_time();
+    bool live = ws && esp_websocket_client_is_connected(ws);
+    cJSON_AddNumberToObject(v, "door_ws_age", live ? (now - ws_at) / 1000000 : -1);
+    cJSON_AddNumberToObject(v, "door_ws_idle", live ? (now - ws_rx_at) / 1000000 : -1);
+    cJSON_AddNumberToObject(v, "door_token_age", door_count && *room.token ? (now - token_at) / 1000000 : -1);
+    cJSON_AddNumberToObject(v, "door_login_age", verified ? (now - verified) / 1000000 : -1);
+    cJSON_AddNumberToObject(v, "door_ws_drops", ws_drops); cJSON_AddNumberToObject(v, "door_ws_reconnects", ws_reconnects);
+}
 static bool open_selected(bool dry, const char *caller, uint32_t generation, char *detail, double *reply_wait) {
     if (caller && !tg_sip_call_matches(generation, caller)) {
         error(detail, "来电已结束或已变化，未开门"); return false;

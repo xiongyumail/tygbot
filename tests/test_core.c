@@ -25,6 +25,13 @@ int main(void) {
     CHECK(tg_parse_json("{\"code\":0}garbage") == NULL);
     char deep[100]; memset(deep,'[',40); memset(deep+40,']',40); deep[80]=0;
     CHECK(tg_parse_json(deep) == NULL);
+    CHECK(tg_door_next_step(false, true, 0) == TG_DOOR_VERIFY);
+    CHECK(tg_door_next_step(true, true, -1) == TG_DOOR_VERIFY);
+    CHECK(tg_door_next_step(true, true, 0) == TG_DOOR_KEEP);
+    CHECK(tg_door_next_step(true, true, TG_LOGIN_CHECK_US - 1) == TG_DOOR_KEEP);
+    CHECK(tg_door_next_step(true, false, TG_LOGIN_CHECK_US - 1) == TG_DOOR_RECONNECT);
+    CHECK(tg_door_next_step(true, true, TG_LOGIN_CHECK_US) == TG_DOOR_VERIFY);
+    CHECK(tg_door_next_step(true, false, TG_LOGIN_CHECK_US) == TG_DOOR_VERIFY);
     CHECK(tg_phone_valid("13800000000")); CHECK(!tg_phone_valid("1380000000")); CHECK(!tg_phone_valid("1380000000X"));
     CHECK(tg_code_valid("ABcd1234", false)); CHECK(!tg_code_valid("", false)); CHECK(tg_code_valid("", true)); CHECK(!tg_code_valid("1234567890123", false));
     CHECK(tg_url_allowed("https://uums.taoyuangu.com:8443/uums/servlet/x", false, false));

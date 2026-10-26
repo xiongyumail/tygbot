@@ -36,8 +36,8 @@ static int login = -1;
 static time_t login_at;
 static bool busy;
 static uint32_t busy_sequence;
-static char warm_detail[TG_DETAIL], warm_at[24];
-static bool warm_ok;
+static char check_detail[TG_DETAIL], check_at[24];
+static bool check_ok;
 static int64_t manual_until;
 static SemaphoreHandle_t stream_slots;
 static QueueHandle_t jobs, call_jobs, requests;
@@ -85,7 +85,7 @@ void tg_door_status_get(tg_door_status *out) {
     out->busy = busy; out->busy_sequence = busy_sequence; out->login = login;
     out->has_door = *last_door_detail != 0;
     tg_copy(out->door_detail, sizeof(out->door_detail), last_door_detail); tg_copy(out->door_at, sizeof(out->door_at), last_door_at);
-    out->has_warm = *warm_at != 0; tg_copy(out->warm_detail, sizeof(out->warm_detail), warm_detail);
+    out->has_check = *check_at != 0; tg_copy(out->check_detail, sizeof(out->check_detail), check_detail);
     xSemaphoreGive(tg_state_lock);
 }
 void tg_target_state_get(tg_target_state *out) {
@@ -148,10 +148,10 @@ cJSON *tg_snapshot(void) {
         cJSON_AddBoolToObject(state, "ok", login == 1); cJSON_AddNumberToObject(state, "ts", login_at); cJSON_AddStringToObject(state, "at", at);
         cJSON_AddItemToObject(v, "login", state);
     }
-    if (*warm_at) {
-        cJSON *warm = cJSON_CreateObject(); cJSON_AddStringToObject(warm, "at", warm_at);
-        cJSON_AddBoolToObject(warm, "ok", warm_ok); cJSON_AddStringToObject(warm, "detail", warm_detail); cJSON_AddItemToObject(v, "last_warm_up", warm);
-    } else cJSON_AddNullToObject(v, "last_warm_up");
+    if (*check_at) {
+        cJSON *check = cJSON_CreateObject(); cJSON_AddStringToObject(check, "at", check_at);
+        cJSON_AddBoolToObject(check, "ok", check_ok); cJSON_AddStringToObject(check, "detail", check_detail); cJSON_AddItemToObject(v, "last_check", check);
+    } else cJSON_AddNullToObject(v, "last_check");
     cJSON_AddStringToObject(v, "version", TG_WEB_VERSION);
     cJSON_AddStringToObject(v, "commit", tg_build_commit);
     selected = target;
@@ -366,16 +366,18 @@ bool tg_submit_call_open(uint32_t generation, const char *caller) {
 /* Latest connection check shown as the HA status. */
 static void note_check(bool ok, const char *detail) {
     xSemaphoreTake(tg_state_lock, portMAX_DELAY);
-    warm_ok = ok; tg_copy(warm_detail, sizeof(warm_detail), detail); tg_timestamp(warm_at, sizeof(warm_at), false);
+    check_ok = ok; tg_copy(check_detail, sizeof(check_detail), detail); tg_timestamp(check_at, sizeof(check_at), false);
     xSemaphoreGive(tg_state_lock);
 }
-/* Returns the delay to the next check: inside the 240 s connection cache while healthy. */
-static int64_t warm(void) {
-    char detail[TG_DETAIL] = ""; bool ok = tg_refresh(true, detail); note_check(ok, detail);
-    return ok ? 200000000LL : !strcmp(detail, TG_LOGGED_OUT) ? 600000000LL : 120000000LL;
+/* Returns the delay to the next check. A live door connection is only looked at locally;
+ * the network is used to reopen a dropped one and to re-verify login every few hours. */
+static int64_t check_door(void) {
+    char detail[TG_DETAIL] = ""; bool network = false, ok = tg_door_check(detail, &network);
+    if (network) note_check(ok, detail);
+    return ok ? 15000000LL : !strcmp(detail, TG_LOGGED_OUT) ? 600000000LL : 120000000LL;
 }
 static void worker(void *unused) {
-    job j; int64_t next_warm = esp_timer_get_time() + 2000000;
+    job j; int64_t next_check = esp_timer_get_time() + 2000000;
     for (;;) {
         call_job pending;
         bool have_call = xQueueReceive(call_jobs, &pending, 0) == pdTRUE;
@@ -387,10 +389,10 @@ static void worker(void *unused) {
             tg_copy(j.caller, sizeof(j.caller), pending.caller); strcpy(j.source, "来电联动");
         }
         if (!have_job) {
-            if (esp_timer_get_time() >= next_warm && esp_timer_get_time() >= manual_until && tg_time_ready()) {
+            if (esp_timer_get_time() >= next_check && esp_timer_get_time() >= manual_until && tg_time_ready()) {
                 int64_t delay = 1000000;
-                if (xSemaphoreTake(tg_action_lock, 0)) { delay = warm(); xSemaphoreGive(tg_action_lock); }
-                next_warm = esp_timer_get_time() + delay;
+                if (xSemaphoreTake(tg_action_lock, 0)) { delay = check_door(); xSemaphoreGive(tg_action_lock); }
+                next_check = esp_timer_get_time() + delay;
             }
             continue;
         }
@@ -617,10 +619,12 @@ static esp_err_t handle(httpd_req_t *req, const char *body) {
             tg_call_state call; tg_sip_state(&call);
             if (call.stack_min_free == UINT32_MAX) cJSON_AddNullToObject(v, "sip_stack_min_free");
             else cJSON_AddNumberToObject(v, "sip_stack_min_free", call.stack_min_free);
+            cJSON_AddNumberToObject(v, "sip_expires", call.expires); cJSON_AddNumberToObject(v, "sip_register_timeouts", call.register_timeouts);
             cJSON_AddBoolToObject(v, "time_ready", tg_time_ready());
             cJSON_AddNumberToObject(v, "heap_free", heap_caps_get_free_size(MALLOC_CAP_8BIT));
             cJSON_AddNumberToObject(v, "heap_min", heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
             cJSON_AddNumberToObject(v, "heap_largest", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            tg_door_diagnostics(v);
             return respond(req, 200, v);
         }
         if (!strcmp(path, "/") || !strcmp(path, "/auth")) {

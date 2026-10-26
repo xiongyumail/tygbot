@@ -11,8 +11,6 @@
 #include "esp_heap_caps.h"
 
 #define TALK_RESPONSE_MAX 8192
-#define TALK_REQUEST_HEAP_MIN 49152
-#define TALK_REQUEST_BLOCK_MIN 24576
 #define TALK_RESPONSE_HEAP_RESERVE 8192
 static char endpoint[256];
 static int endpoint_port = 6000;
@@ -69,7 +67,7 @@ static bool room_for_request(char *detail) {
     /* 只在新建 TLS 前检查；真机维持门禁连接时约有 61 KB 可用。 */
     size_t free_bytes = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    if (free_bytes >= TALK_REQUEST_HEAP_MIN && largest >= TALK_REQUEST_BLOCK_MIN) return true;
+    if (free_bytes >= TG_TLS_HEAP_MIN && largest >= TG_TLS_BLOCK_MIN) return true;
     snprintf(detail, TG_DETAIL, "对讲内存不足（可用 %u KB，最大块 %u KB），稍后重试", (unsigned)(free_bytes / 1024), (unsigned)(largest / 1024));
     return false;
 }

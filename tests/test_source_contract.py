@@ -51,6 +51,10 @@ class SourceContract(unittest.TestCase):
         self.assertIn("platform: esphome", config)
         self.assertNotIn("platform: restart", config)
 
+    def test_wifi_receive_buffers_capped(self):
+        codegen = (COMPONENT / "__init__.py").read_text()
+        self.assertIn('"CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM": 16,', codegen)
+
     def test_ha_open_is_only_queued(self):
         web = (COMPONENT / "web.c").read_text()
         adapter = (COMPONENT / "tygbot.cpp").read_text()
@@ -158,13 +162,18 @@ class SourceContract(unittest.TestCase):
         self.assertIn("host: ${device_name}.local", package)
         self.assertIn("esp32_ble_tracker:", package)
 
-    def test_session_kept_and_connection_stays_warm(self):
+    def test_session_and_door_connection_kept(self):
         protocol = (ROOT / "core/protocol.c").read_text()
         # A logout-like reply marks the session invalid but never erases it.
         self.assertNotIn("user_token[0] = 0", protocol)
-        self.assertIn("240000000LL", protocol)
+        # The door WSS is kept open, not rebuilt on a timer; a dead one is detected by PONG timeout.
+        self.assertNotIn("240000000LL", protocol)
+        self.assertIn(".pingpong_timeout_sec = 45", protocol)
+        self.assertIn("if (kept && ws_fresh()) return true;", protocol)
+        self.assertIn("id == WEBSOCKET_EVENT_CONNECTED || id == WEBSOCKET_EVENT_DATA) ws_rx_at", protocol)
         web = (ROOT / "core/web.c").read_text()
-        self.assertIn("return ok ? 200000000LL", web)
+        self.assertIn("ok = tg_door_check(detail, &network);", web)
+        self.assertIn("return ok ? 15000000LL", web)
 
     def test_lan_firmware_upload_only_from_own_page(self):
         web = (ROOT / "core/web.c").read_text()
@@ -264,7 +273,12 @@ class SourceContract(unittest.TestCase):
         self.assertIn("未知门禁", page)
         self.assertNotIn("门口机呼叫中", page)
         self.assertIn("name: Call Linked Open 来电联动开门", package)
-        self.assertIn("lambda: return id(tygbot_core).call_linked_open_enabled();", package)
+        self.assertIn("return id(tygbot_core).call_linked_open_enabled();", package)
+        # Boot neither writes a default back to the switch nor reports an unknown login as logged out.
+        self.assertIn("restore_mode: DISABLED", package)
+        self.assertIn("if (!id(tygbot_core).ready()) return {};", package)
+        self.assertIn("if (!id(tygbot_core).login_known()) return {};", package)
+        self.assertIn('!login_known_ ? "正在检查登录"', (COMPONENT / "tygbot.cpp").read_text())
         self.assertIn("id(tygbot_core).set_call_linked_open(true);", package)
         self.assertIn("id(tygbot_core).set_call_linked_open(false);", package)
         self.assertIn("tg_submit_call_linked_open", (COMPONENT / "tygbot.cpp").read_text())

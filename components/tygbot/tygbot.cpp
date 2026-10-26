@@ -214,13 +214,14 @@ void TYGBot::update() {
   sync_transient_state_();
   tg_door_status door;
   tg_door_status_get(&door);
+  login_known_ = door.login >= 0;
   logged_in_ = door.login == 1;
   if (door.has_door) {
     last_result_ = door.door_detail;
     last_result_ += " · "; last_result_ += door.door_at;
   }
   status_ = !tg_time_ready() ? "等待网络校时" : busy_ ? "正在请求开门" :
-      door.has_warm ? door.warm_detail : logged_in_ ? "已登录" : "请在设备网页短信登录";
+      door.has_check ? door.check_detail : !login_known_ ? "正在检查登录" : logged_in_ ? "已登录" : "请在设备网页短信登录";
   if (sip_started_) {
     tg_call_state call;
     tg_target_state target;

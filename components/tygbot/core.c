@@ -61,6 +61,10 @@ bool tg_caller_target_unique(size_t household_count, const tg_door *doors, size_
     for (size_t i = 0; i < count; i++) if (!strcmp(doors[i].code, doors[selected].code)) matches++;
     return matches == 1;
 }
+tg_door_step tg_door_next_step(bool target, bool live, int64_t since_verified_us) {
+    if (!target || since_verified_us < 0 || since_verified_us >= TG_LOGIN_CHECK_US) return TG_DOOR_VERIFY;
+    return live ? TG_DOOR_KEEP : TG_DOOR_RECONNECT;
+}
 bool tg_phone_valid(const char *v) {
     if (!v || strlen(v) != 11 || v[0] != '1') return false;
     for (int i = 0; i < 11; i++) if (v[i] < '0' || v[i] > '9') return false;

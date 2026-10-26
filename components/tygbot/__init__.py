@@ -106,5 +106,7 @@ async def to_code(config):
         "CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN": 4096,
         "CONFIG_ESP_WIFI_IRAM_OPT": False,
         "CONFIG_ESP_WIFI_RX_IRAM_OPT": False,
+        # Receive bursts filled all 32 buffers and took free heap from about 60 KB to under 5 KB.
+        "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM": 16,
     }.items():
         esp32.add_idf_sdkconfig_option(name, value)
