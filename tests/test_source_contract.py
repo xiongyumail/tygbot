@@ -67,6 +67,7 @@ class SourceContract(unittest.TestCase):
         codegen = (COMPONENT / "__init__.py").read_text()
         self.assertIn('cg.add_define("USE_WEBSERVER")', codegen)
         self.assertIn('cg.add_define("USE_WEBSERVER_PORT", 80)', codegen)
+        self.assertIn('if hasattr(json, "enable_arena"):\n        json.enable_arena()', codegen)
         self.assertIn('AUTO_LOAD = ["json", "web_server_base"]', codegen)
         self.assertIn('("web_server.h", "list_entities.h")', codegen)
         self.assertIn('cg.add_define("MDNS_SERVICE_COUNT", int(str(counts[0].value)) + 1)', codegen)
@@ -141,8 +142,8 @@ class SourceContract(unittest.TestCase):
     def test_remote_package_and_component_are_version_pinned(self):
         example = (ROOT / "tygbot.example.yaml").read_text()
         package = PACKAGE.read_text()
-        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.3.0", example)
-        self.assertIn("repository_ref: v1.3.0", package)
+        self.assertIn("github://xiongyumail/tygbot/packages/tygbot.yaml@v1.3.1", example)
+        self.assertIn("repository_ref: v1.3.1", package)
         self.assertIn("ref: ${repository_ref}", package)
         self.assertNotIn("type: local", package)
         self.assertIn("refresh: always", package)

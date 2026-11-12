@@ -29,6 +29,9 @@ jobs:
   firmware:
     needs: test
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        esphome: ["2026.9.1", "2026.10.2"]
     permissions:
       contents: write
     steps:
@@ -41,10 +44,10 @@ jobs:
           path: |
             ~/.cache/esphome
             ~/.platformio
-          key: esphome-2026.9.1-${{ hashFiles('components/tygbot/__init__.py') }}
-          restore-keys: esphome-2026.9.1-
+          key: esphome-${{ matrix.esphome }}-${{ hashFiles('components/tygbot/__init__.py') }}
+          restore-keys: esphome-${{ matrix.esphome }}-
       - name: Install ESPHome
-        run: pip install esphome==2026.9.1
+        run: pip install esphome==${{ matrix.esphome }}
       # Build the checked-out component instead of the tagged GitHub source.
       - name: Prepare configuration
         run: |
@@ -73,10 +76,10 @@ jobs:
           (cd dist && sha256sum * > SHA256SUMS)
       - uses: actions/upload-artifact@v7
         with:
-          name: firmware
+          name: firmware-esphome-${{ matrix.esphome }}
           path: dist/
       - name: Publish release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && matrix.esphome == '2026.10.2'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

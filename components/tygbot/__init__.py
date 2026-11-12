@@ -7,13 +7,13 @@ import subprocess
 import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.final_validate as fv
-from esphome.components import esp32, socket, web_server
+from esphome.components import esp32, json, socket, web_server
 from esphome.const import CONF_ID, CONF_PASSWORD, __version__ as ESPHOME_VERSION
 from esphome.core import CORE
 
 _LOGGER = logging.getLogger(__name__)
 # Web UI sharing relies on ESPHome internals (web_server headers, mdns service count).
-TESTED_ESPHOME = "2026.9."
+TESTED_ESPHOME = ("2026.9.", "2026.10.")
 DEPENDENCIES = ["esp32", "wifi"]
 AUTO_LOAD = ["json", "web_server_base"]
 tygbot_ns = cg.esphome_ns.namespace("tygbot")
@@ -48,8 +48,9 @@ def validate_framework(config):
     if config["require_auth"] and CONF_PASSWORD not in config:
         raise cv.Invalid("password is required unless require_auth is false")
     if not ESPHOME_VERSION.startswith(TESTED_ESPHOME):
-        _LOGGER.warning("TYGBot is tested with ESPHome %sx; found %s", TESTED_ESPHOME, ESPHOME_VERSION)
-    # HA shows the project version as the firmware: append the built commit, e.g. 1.3.0+a1b2c.
+        _LOGGER.warning("TYGBot is tested with ESPHome %s; found %s",
+                        ", ".join(version + "x" for version in TESTED_ESPHOME), ESPHOME_VERSION)
+    # HA shows the project version as the firmware: append the built commit, e.g. 1.3.1+a1b2c.
     project = fv.full_config.get().get("esphome", {}).get("project")
     commit = build_commit()
     if commit and project and "+" not in project["version"]:
@@ -69,6 +70,10 @@ async def to_code(config):
     # but do not load the standard web_server component.
     cg.add_define("USE_WEBSERVER")
     cg.add_define("USE_WEBSERVER_PORT", 80)
+    # ESPHome 2026.10's IDF event source needs the same JSON arena opt-in
+    # as web_server.to_code; 2026.9 has neither the hook nor this requirement.
+    if hasattr(json, "enable_arena"):
+        json.enable_arena()
     # USE_WEBSERVER also makes mdns publish an _http service that its
     # compile-time count omits; without the extra slot it overwrites
     # _esphomelib and Home Assistant cannot discover the device.
